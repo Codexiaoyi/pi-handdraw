@@ -1,21 +1,17 @@
 /**
- * handdraw — 手绘风图表扩展
+ * handdraw — 实时手绘画布扩展
  *
- * 给 AI 一个 `handdraw` 工具：用结构化的"绘画语言"描述图形
- * （方框/椭圆/菱形/箭头/文字/路径），生成手绘风 SVG + PNG，
- * 并在 pi TUI 中内联显示（Warp / Kitty / iTerm2 / Ghostty / WezTerm 支持）。
+ * 给 AI 一个 `handdraw_canvas` 工具：用结构化的"绘画语言"描述图形
+ * （方框/椭圆/菱形/箭头/文字/路径），在浏览器无限画布上逐笔实时书写
+ * （rough.js 手绘风 + 楷体文字 + 钢笔跟随动画）。
  *
  * 安装：复制到 ~/.pi/agent/extensions/handdraw/ 后 npm install，/reload 生效。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Image, Text } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
-import { Resvg } from "@resvg/resvg-js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Type } from "typebox";
 import { exec } from "node:child_process";
-import { join } from "node:path";
-import { buildSvg, buildStrokeSequence, buildHandwritingHtml, layoutElements, type AnimSpeed, type BuildOptions, type HandDrawElement } from "./draw";
-import { getCanvasServer, CANVAS_PORT, type StrokeMsg, type CanvasElementInfo } from "./canvas-server";
+import { buildStrokeSequence, type BuildOptions, type HandDrawElement } from "./draw";
+import { getCanvasServer, type StrokeMsg, type CanvasElementInfo } from "./canvas-server";
 
 // ---------------------------------------------------------------------------
 // 参数 Schema
@@ -24,8 +20,8 @@ import { getCanvasServer, CANVAS_PORT, type StrokeMsg, type CanvasElementInfo } 
 const boxLike = (literal: "box" | "ellipse" | "diamond") =>
   Type.Object({
     type: Type.Literal(literal),
-    x: Type.Optional(Type.Number({ description: "左上角 x（flow 布局下可省略）" })),
-    y: Type.Optional(Type.Number({ description: "左上角 y（flow 布局下可省略）" })),
+    x: Type.Number({ description: "左上角 x（画布绝对坐标）" }),
+    y: Type.Number({ description: "左上角 y（画布绝对坐标）" }),
     w: Type.Optional(Type.Number({ description: "宽度，默认 160" })),
     h: Type.Optional(Type.Number({ description: "高度，默认 70" })),
     text: Type.Optional(Type.String({ description: "形状内文字，自动居中" })),
@@ -74,47 +70,9 @@ const elementSchema = Type.Union([
   }),
 ]);
 
-const parametersSchema = Type.Object({
-  title: Type.Optional(Type.String({ description: "图表标题（flow 布局下显示在顶部）" })),
-  width: Type.Optional(Type.Number({ description: "画布宽，默认 800；flow 布局下自动计算" })),
-  height: Type.Optional(Type.Number({ description: "画布高，默认 500；flow 布局下自动计算" })),
-  background: Type.Optional(Type.String({ description: "画布背景色，如 #fdf6e3（米色纸张效果），默认透明/白" })),
-  layout: Type.Optional(
-    Type.Union([Type.Literal("flow"), Type.Literal("manual")], {
-      description: "flow=形状自动排布+自动画箭头（画流程图最简单）；manual=完全手动指定坐标",
-    })
-  ),
-  live: Type.Optional(
-    Type.Union([Type.Literal("auto"), Type.Literal("real"), Type.Literal("fast"), Type.Literal("instant")], {
-      description:
-        "书写动画：auto=自动（笔画多时加快）；real=真实手写速度（一笔一笔写，中文按笔顺）；fast=快速书写；instant=不播动画直接出图。默认 auto",
-    })
-  ),
-  elements: Type.Array(elementSchema, { description: "图形元素列表" }),
-});
-
-type HandDrawParams = Static<typeof parametersSchema> & {
-  elements: Array<{ type: string } & Record<string, unknown>>;
-};
-
 // ---------------------------------------------------------------------------
-// 工具结果/入口数据
+// 工具辅助
 // ---------------------------------------------------------------------------
-
-interface DrawingEntryData {
-  title: string;
-  svgPath: string;
-  pngPath?: string;
-  timestamp: number;
-}
-
-const OUT_DIR_NAME = "handdraw";
-
-function timestampSlug(): string {
-  const d = new Date();
-  const p = (n: number, l = 2) => String(n).padStart(l, "0");
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-}
 
 function toElement(raw: { type: string } & Record<string, unknown>): HandDrawElement {
   return raw as unknown as HandDrawElement;
@@ -138,42 +96,18 @@ function toElementInfo(el: HandDrawElement): CanvasElementInfo {
   return { type: el.type, label: el.text, x: el.x, y: el.y, w: 60, h: 20 };
 }
 
-// ---------------------------------------------------------------------------
-// Live 绘制：在 TUI 中用 Kitty 图片协议逐元素实时绘制
-// ---------------------------------------------------------------------------
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) return resolve();
-    const t = setTimeout(() => resolve(), ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      resolve();
-    }, { once: true });
-  });
-}
-
-/** 用默认浏览器打开文件（macOS/Linux/Windows） */
-function openInBrowser(filePath: string) {
+/** 用默认浏览器打开 URL（macOS/Linux/Windows） */
+function openInBrowser(url: string) {
   const cmd =
     process.platform === "darwin"
-      ? `open "${filePath}"`
+      ? `open "${url}"`
       : process.platform === "win32"
-        ? `start "" "${filePath}"`
-        : `xdg-open "${filePath}"`;
-  exec(cmd, (err) => {
-    if (err) {
-      // 打开失败不影响主流程
-    }
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
+  exec(cmd, () => {
+    // 打开失败不影响主流程
   });
 }
-
-/** 渲染 SVG 为 PNG Buffer */
-function renderPngBuf(svg: string, background: string): Buffer {
-  return new Resvg(svg, { background }).render().asPng();
-}
-
-
 
 // ---------------------------------------------------------------------------
 // 扩展入口
@@ -266,14 +200,15 @@ export default function (pi: ExtensionAPI) {
     description:
       "在实时画布上增量绘制（浏览器无限画布 + 钢笔指示器逐笔书写）。\n" +
       "每次调用只画 1~3 个元素，调用后浏览器里会实时出现新笔画（钢笔跟随书写）。\n" +
-      "元素必须用 layout 为 manual 的绝对坐标（x/y 是左上角）。\n" +
+      "元素必须用绝对坐标（box/ellipse/diamond 的 x/y 是左上角，w/h 是宽高）。\n" +
       "画布自动扩展，元素可以放到任意坐标。",
     promptSnippet: "Draw incrementally on a live canvas with a pen indicator (one call = a few strokes)",
     promptGuidelines: [
       "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
       "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
       "实时画图时：一次只画 1-2 个元素（比如先画一个框，再画它的文字），这样用户可以看着笔一笔一笔画。",
-      "Use manual coordinates (x/y 左上角). Boxes ~160x70 default; arrows connect existing boxes using their edge coordinates.",
+      "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
+      "Each heading/label must be exactly ONE text element — never repeat the same text at multiple positions.",
       "After drawing a few elements, check the returned summary to place the next ones without overlap.",
     ],
     parameters: Type.Object({
@@ -283,14 +218,12 @@ export default function (pi: ExtensionAPI) {
         })
       ),
       elementId: Type.Optional(Type.String({ description: "要修改/删除的元素 ID（从上次返回的摘要或 occupied 列表获取）" })),
-      title: Type.Optional(Type.String({ description: "本批次的标题（画在顶部，可省略）" })),
       elements: Type.Array(elementSchema, { description: "本次要画的元素（draw 用）或新元素（update 用）" }),
     }),
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = rawParams as {
         action?: string;
         elementId?: string;
-        title?: string;
         elements: Array<{ type: string } & Record<string, unknown>>;
       };
       const action = (params.action ?? "draw") as "draw" | "update" | "remove" | "status";
@@ -301,7 +234,6 @@ export default function (pi: ExtensionAPI) {
           details: { ok: false },
         };
       }
-      const server = getCanvasServer();
 
       if (action === "status" || (action === "draw" && (params.elements ?? []).length === 0)) {
         const summary = (await canvasSummary()) as unknown as {
@@ -347,6 +279,7 @@ export default function (pi: ExtensionAPI) {
           dur: Math.round(s.dur * 1000),
           fill: s.fillOnly,
           isText: s.isText,
+          hatch: s.hatch,
           penUp: false,
           label: s.label,
           elementId: params.elementId,
@@ -398,6 +331,7 @@ export default function (pi: ExtensionAPI) {
             dur: Math.round(s.dur * 1000),
             fill: s.fillOnly,
             isText: s.isText,
+            hatch: s.hatch,
             penUp: false,
             label: s.label,
             elementId: elId,
@@ -427,215 +361,6 @@ export default function (pi: ExtensionAPI) {
         ],
         details: summary,
       };
-    },
-  });
-
-  // ---- TUI 内联显示手绘图（自定义 entry，不进 LLM 上下文） ----
-  pi.registerEntryRenderer<DrawingEntryData>("handdraw-drawing", (entry, _opts, theme) => {
-    const data = entry.data;
-    const title = data?.title ?? "手绘图";
-    const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(theme.fg("accent", `✏️ ${title}`), 0, 0));
-
-    if (data?.pngPath && existsSync(data.pngPath)) {
-      try {
-        const b64 = readFileSync(data.pngPath).toString("base64");
-        const image = new Image(b64, "image/png", { fallbackColor: (s) => theme.fg("dim", s) }, {
-          maxWidthCells: 76,
-          maxHeightCells: 44,
-        });
-        box.addChild(image);
-      } catch (err) {
-        box.addChild(new Text(theme.fg("dim", `(PNG 渲染失败: ${(err as Error).message})`), 0, 0));
-      }
-    } else {
-      box.addChild(new Text(theme.fg("dim", `SVG: ${data?.svgPath ?? "(无)"}`), 0, 0));
-    }
-    return box;
-  });
-
-  // ---- 工具：handdraw ----
-  pi.registerTool({
-    name: "handdraw",
-    label: "手绘图表",
-    description:
-      "生成手绘风格的图表/流程图/示意图（rough.js 手绘风 + 楷体文字），保存为 SVG 和 PNG 文件并在终端内联显示。\n" +
-      "用法示例（画一个手绘流程图，flow 布局会自动排布形状并画箭头）：\n" +
-      'handdraw({ title: "登录流程", layout: "flow", background: "#fdf6e3", elements: [\n' +
-      '  { type: "box", text: "开始" },\n' +
-      '  { type: "box", text: "输入用户名密码", fill: "#d6eaf8" },\n' +
-      '  { type: "diamond", text: "验证通过?", fill: "#fdebd0" },\n' +
-      '  { type: "box", text: "进入主页", fill: "#d5f5e3" },\n' +
-      '  { type: "box", text: "提示错误", fill: "#fadbd8" }\n' +
-      "] })\n" +
-      "手动布局：layout: \"manual\"，每个元素用 x/y 坐标精确定位（box/ellipse/diamond 的 x/y 是左上角，w/h 是宽高；line/arrow 用 x1,y1,x2,y2；text 用 x,y）。",
-    promptSnippet: "Generate hand-drawn style diagrams (SVG+PNG) and show them inline",
-    promptGuidelines: [
-      "Use handdraw when the user asks for a diagram, flowchart, mind map, or any sketchy/hand-drawn visual (流程图中 boxes 用 flow 布局最省事，只需列出形状和文字).",
-      "When drawing flowcharts with handdraw, prefer layout \"flow\": list box/ellipse/diamond elements in order and arrows between consecutive shapes are drawn automatically.",
-      "For exact positioning (mind maps, architecture diagrams), use handdraw with layout \"manual\" and give every element explicit coordinates.",
-      "Keep text short (Chinese or English, renders in Kaiti SC calligraphy font); long paragraphs do not wrap and will overflow the shape.",
-    ],
-    parameters: parametersSchema,
-    async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-      const params = rawParams as HandDrawParams;
-      const outDir = join(ctx.cwd, OUT_DIR_NAME);
-      mkdirSync(outDir, { recursive: true });
-
-      const slug = timestampSlug();
-      const rawElements = (params.elements ?? []).map(toElement);
-      const layout: "flow" | "manual" = (params.layout as "flow" | "manual" | undefined) ?? "flow";
-      const buildOpts: BuildOptions = {
-        title: params.title,
-        width: params.width,
-        height: params.height,
-        background: params.background,
-        layout,
-        elements: rawElements,
-      };
-
-      // 先做一次完整布局，固定所有元素坐标（live 逐步绘制时位置一致）
-      const laidOut = layoutElements(buildOpts);
-      const stageOpts: BuildOptions = {
-        ...buildOpts,
-        layout: "manual",
-        width: laidOut.width,
-        height: laidOut.height,
-        showTitle: true,
-        elements: laidOut.elements,
-      };
-
-      // live 参数解析：auto / real / fast / instant（浏览器手写动画速度）
-      const liveParam = (params.live as "auto" | "real" | "fast" | "instant" | undefined) ?? "auto";
-      const textLen =
-        (params.title ?? "").length +
-        (params.elements ?? []).reduce((n, el) => n + ("text" in el && el.text ? Array.from(el.text as string).length : 0), 0);
-      const speed: AnimSpeed = liveParam === "fast" || (liveParam === "auto" && textLen > 24) ? "fast" : "real";
-      const playBrowser = liveParam !== "instant" && ctx.hasUI;
-
-      // 静态图（笔画手写体：汉字按笔顺渲染，无笔画数据字符 fallback 字体）
-      const finalSvg = buildSvg(stageOpts);
-      const svgPath = join(outDir, `${slug}.svg`);
-      writeFileSync(svgPath, finalSvg);
-
-      // 浏览器手写动画页
-      let htmlPath: string | undefined;
-      let htmlHint = "";
-      let htmlError: string | undefined;
-      try {
-        const { html, fileHint } = buildHandwritingHtml(stageOpts, speed);
-        htmlPath = join(outDir, `${slug}.html`);
-        writeFileSync(htmlPath, html);
-        htmlHint = fileHint;
-        if (playBrowser) {
-          openInBrowser(htmlPath);
-        }
-      } catch (err) {
-        htmlPath = undefined;
-        htmlError = (err as Error).message;
-      }
-
-      let pngPath: string | undefined;
-      try {
-        const pngBuf = renderPngBuf(finalSvg, params.background === "transparent" ? "transparent" : "white");
-        pngPath = join(outDir, `${slug}.png`);
-        writeFileSync(pngPath, pngBuf);
-      } catch (err) {
-        // PNG 失败不影响 SVG
-      }
-
-      pi.appendEntry<DrawingEntryData>("handdraw-drawing", {
-        title: params.title ?? "手绘图",
-        svgPath,
-        pngPath,
-        timestamp: Date.now(),
-      });
-
-      const count = stageOpts.elements.length;
-      const liveNote = playBrowser
-        ? `✏️ 手写动画已在浏览器打开（${htmlHint}，${speed === "real" ? "真实手写速度" : "快速书写"}）`
-        : liveParam === "instant"
-          ? "手写动画：已按 instant 关闭（仅静态图）"
-          : "手写动画：无 UI 环境，未自动打开浏览器（可手动打开 HTML 观看）";
-      const htmlWarn = htmlError ? `⚠️ 动画页生成失败: ${htmlError}` : "";
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `已生成手绘图表「${params.title ?? "手绘图"}」（${count} 个元素）。\n` +
-              (htmlPath ? `动画页: ${htmlPath}\n` : "") +
-              (htmlWarn ? `${htmlWarn}\n` : "") +
-              `SVG: ${svgPath}\n` +
-              (pngPath ? `PNG: ${pngPath}\n` : "(PNG 渲染失败，仅保存 SVG)\n") +
-              `${liveNote}\n` +
-              "（文字为逐笔手写笔画，不是字体；浏览器页面可重播）",
-          },
-        ],
-        details: { svgPath, pngPath, htmlPath, elementCount: count, layout, live: playBrowser, speed },
-      };
-    },
-  });
-
-  // ---- 命令：/handdraw-demo 生成示例图并在浏览器播放手写动画 ----
-  pi.registerCommand("handdraw-demo", {
-    description: "生成示例图并在浏览器播放手写动画",
-    handler: async (_args, ctx) => {
-      const outDir = join(ctx.cwd, OUT_DIR_NAME);
-      mkdirSync(outDir, { recursive: true });
-      const slug = timestampSlug();
-      const buildOpts: BuildOptions = {
-        title: "手绘示例：周末计划",
-        layout: "flow",
-        background: "#fdf6e3",
-        elements: [
-          { type: "ellipse", text: "起床" },
-          { type: "box", text: "去公园散步", fill: "#d6eaf8" },
-          { type: "diamond", text: "下雨?", fill: "#fdebd0" },
-          { type: "box", text: "去咖啡店", fill: "#d5f5e3" },
-          { type: "box", text: "回家看书", fill: "#fadbd8" },
-        ],
-      };
-      const laidOut = layoutElements(buildOpts);
-      const stageOpts: BuildOptions = {
-        ...buildOpts,
-        layout: "manual",
-        width: laidOut.width,
-        height: laidOut.height,
-        showTitle: true,
-        elements: laidOut.elements,
-      };
-      const speed: AnimSpeed = "fast";
-      const finalSvg = buildSvg(stageOpts);
-      const svgPath = join(outDir, `${slug}.svg`);
-      writeFileSync(svgPath, finalSvg);
-      let htmlPath: string | undefined;
-      try {
-        const { html, fileHint } = buildHandwritingHtml(stageOpts, speed);
-        htmlPath = join(outDir, `${slug}.html`);
-        writeFileSync(htmlPath, html);
-        if (ctx.hasUI) {
-          openInBrowser(htmlPath);
-        }
-        ctx.ui.notify(`已在浏览器打开手写动画（${fileHint}）: ${htmlPath}`, "info");
-      } catch (err) {
-        htmlPath = undefined;
-        ctx.ui.notify(`HTML 生成失败: ${(err as Error).message}`, "error");
-      }
-      let pngPath: string | undefined;
-      try {
-        const pngBuf = renderPngBuf(finalSvg, "white");
-        pngPath = join(outDir, `${slug}.png`);
-        writeFileSync(pngPath, pngBuf);
-      } catch {
-        /* ignore */
-      }
-      pi.appendEntry<DrawingEntryData>("handdraw-drawing", {
-        title: "手绘示例",
-        svgPath,
-        pngPath,
-        timestamp: Date.now(),
-      });
     },
   });
 }

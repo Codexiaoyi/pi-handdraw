@@ -24,21 +24,44 @@
   }
   button { border: 1.5px solid #c9bfa6; background: #fdf6e3; color: #6b6350; border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
   button:hover { background: #f3ecd9; }
-  /* 笔尖指示器 */
-  #pen { transition: none; pointer-events: none; }
+  /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动） */
+  #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); }
 </style>
 </head>
 <body>
 <div class="stage">
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
     <g id="content"></g>
-    <!-- 钢笔指示器：笔杆 + 笔尖 -->
+    <!--
+      钢笔：笔尖在 (0,0)，笔身沿 -y 方向；JS 里 translate 到笔画点 + 固定倾角。
+      结构：金色笔尖（含中缝和呼吸孔）→ 握位 → 笔杆（酒红渐变 + 高光）→ 笔顶圆珠
+    -->
     <g id="pen" opacity="0">
-      <g transform="translate(0,0)">
-        <rect x="-3" y="-24" width="6" height="20" rx="2" fill="#c0392b"/>
-        <polygon points="0,20 4,4 -4,4" fill="#8e44ad"/>
-        <polygon points="-1.5,-24 1.5,-24 3,0 -3,0" fill="#f1c40f"/>
-        <circle cx="0" cy="-26" r="2.4" fill="#34495e"/>
+      <g id="penInner">
+        <defs>
+          <linearGradient id="barrelGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#8e2f23"/>
+            <stop offset="0.45" stop-color="#c0392b"/>
+            <stop offset="1" stop-color="#6e241b"/>
+          </linearGradient>
+          <linearGradient id="nibGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#c9a227"/>
+            <stop offset="0.5" stop-color="#f4d03f"/>
+            <stop offset="1" stop-color="#b8912a"/>
+          </linearGradient>
+        </defs>
+        <!-- 笔杆 -->
+        <rect x="-4" y="-46" width="8" height="26" rx="3.5" fill="url(#barrelGrad)"/>
+        <rect x="-2.6" y="-44" width="1.6" height="22" rx="0.8" fill="#e8b0a5" opacity="0.55"/>
+        <!-- 笔顶装饰环 + 圆珠 -->
+        <rect x="-4.4" y="-49" width="8.8" height="3.4" rx="1.7" fill="#d4ac0d"/>
+        <circle cx="0" cy="-51.5" r="2.6" fill="#7b241c"/>
+        <!-- 握位 -->
+        <path d="M -3.4 -20 L 3.4 -20 L 2.6 -13 L -2.6 -13 Z" fill="#2c3e50"/>
+        <!-- 笔尖（铱金粒 → 尖） -->
+        <path d="M -2.6 -13 L 2.6 -13 L 1.1 -2 L 0 0 L -1.1 -2 Z" fill="url(#nibGrad)"/>
+        <line x1="0" y1="-12" x2="0" y2="-1.6" stroke="#7d6608" stroke-width="0.7"/>
+        <circle cx="0" cy="-8.5" r="0.9" fill="#7d6608"/>
       </g>
     </g>
   </svg>
@@ -55,7 +78,7 @@
 const svg = document.getElementById("canvas");
 const content = document.getElementById("content");
 const pen = document.getElementById("pen");
-const penInner = pen.firstElementChild;
+const penInner = document.getElementById("penInner");
 const labelEl = document.getElementById("curLabel");
 const progEl = document.getElementById("progress");
 let vb = { x: 0, y: 0, w: 800, h: 500 };
@@ -95,36 +118,113 @@ svg.addEventListener("wheel", (e) => {
 }, { passive: false });
 applyView();
 
-// ---------- 笔画播放 + 笔尖跟随 ----------
+// ---------- 笔画播放 + 钢笔跟随 ----------
 let totalStrokes = 0;
 let queue = Promise.resolve();
+let wipeSeq = 0;
+
+/** 固定握笔倾角：真实书写时笔的角度基本不变，随路径切线旋转会剧烈抖动 */
+const PEN_ANGLE = -30;
+/** 笔尖当前位置（画布坐标），用于笔画间的抬笔滑行 */
+let penPos = null;
+
+function movePen(x, y) {
+  penPos = { x, y };
+  penInner.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${PEN_ANGLE})`);
+}
+function showPen() { pen.setAttribute("opacity", "1"); }
+function hidePen() { pen.setAttribute("opacity", "0"); }
+
+/** 抬笔滑行：从当前位置平滑移到下一笔起点（easeOutCubic，按距离定时长） */
+function glidePen(to) {
+  const from = penPos;
+  if (!from) { movePen(to.x, to.y); return Promise.resolve(); }
+  const dist = Math.hypot(to.x - from.x, to.y - from.y);
+  if (dist < 24) { movePen(to.x, to.y); return Promise.resolve(); }
+  const dur = Math.min(280, 70 + dist * 0.3);
+  showPen();
+  const startT = performance.now();
+  return new Promise((resolve) => {
+    function frame(now) {
+      const t = Math.min(1, (now - startT) / dur);
+      const e = 1 - Math.pow(1 - t, 3);
+      movePen(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e);
+      if (t < 1) requestAnimationFrame(frame); else resolve();
+    }
+    requestAnimationFrame(frame);
+  });
+}
 
 function svgNS(tag) { return document.createElementNS("http://www.w3.org/2000/svg", tag); }
 
-/** 播放单个笔画（写出来 + 笔尖跟随） */
-function playStroke(s, penUp) {
+/** 播放单个笔画（写出来 + 钢笔跟随） */
+async function playStroke(s) {
   const dur = Math.max(80, s.dur || 300);
-  // 淡入文字
+  // 字体文字（拉丁/符号）：擦除式显出——从左到右揭开，笔尖跟着写出前沿走，
+  // 保留原字体的美观，又不像淡入那样"跳出来"
   if (s.isText) {
     const g = svgNS("g");
     g.innerHTML = s.d;
     if (s.elementId) g.setAttribute("data-element-id", s.elementId);
-    g.style.opacity = "0";
-    g.style.transition = "opacity 0.4s";
     content.appendChild(g);
-    requestAnimationFrame(() => { g.style.opacity = "1"; });
-    hidePen();
-    return;
+    const bb = g.getBBox();
+    const pad = Math.max(2, bb.height * 0.1);
+    const clipId = `wipe${++wipeSeq}`;
+    const clip = svgNS("clipPath");
+    clip.setAttribute("id", clipId);
+    const rect = svgNS("rect");
+    rect.setAttribute("x", bb.x - pad);
+    rect.setAttribute("y", bb.y - pad);
+    rect.setAttribute("width", "0");
+    rect.setAttribute("height", bb.height + pad * 2);
+    clip.appendChild(rect);
+    content.appendChild(clip);
+    g.setAttribute("clip-path", `url(#${clipId})`);
+
+    const wipeDur = Math.max(200, dur);
+    const startX = bb.x - pad;
+    const full = bb.width + pad * 2;
+    const penY = bb.y + bb.height * 0.72; // 笔尖贴在基线附近
+    await glidePen({ x: startX, y: penY });
+    showPen();
+    const startT = performance.now();
+    return new Promise((resolve) => {
+      function frame(now) {
+        const t = Math.min(1, (now - startT) / wipeDur);
+        rect.setAttribute("width", String(full * t));
+        movePen(startX + full * t, penY);
+        if (t < 1) {
+          requestAnimationFrame(frame);
+        } else {
+          g.removeAttribute("clip-path"); // 显完去掉裁剪，不留残留节点
+          clip.remove();
+          resolve();
+        }
+      }
+      requestAnimationFrame(frame);
+    });
   }
   const p = svgNS("path");
   p.setAttribute("d", s.d);
   if (s.elementId) p.setAttribute("data-element-id", s.elementId);
-  p.setAttribute("fill", "none");
-  p.setAttribute("stroke", s.fill || s.color);
-  p.setAttribute("stroke-width", s.width);
   p.setAttribute("stroke-linecap", "round");
   p.setAttribute("stroke-linejoin", "round");
+  if (s.hatch) {
+    // 填充斜线：所有线合并为一条 path，整体快速生长，笔尖不跟随
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", s.color);
+    p.setAttribute("stroke-width", s.width);
+    content.appendChild(p);
+    const hlen = p.getTotalLength();
+    p.style.strokeDasharray = hlen;
+    p.style.strokeDashoffset = hlen;
+    p.style.transition = `stroke-dashoffset ${dur}ms ease-out`;
+    hidePen();
+    requestAnimationFrame(() => { p.style.strokeDashoffset = "0"; });
+    return new Promise(r => setTimeout(r, dur));
+  }
   if (s.fill) {
+    // 填充图形（箭头尖）：淡入
     p.setAttribute("fill", s.fill);
     p.setAttribute("stroke", "none");
     p.style.opacity = "0";
@@ -134,6 +234,9 @@ function playStroke(s, penUp) {
     hidePen();
     return new Promise(r => setTimeout(r, dur));
   }
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", s.color);
+  p.setAttribute("stroke-width", s.width);
   content.appendChild(p);
 
   const len = p.getTotalLength();
@@ -142,20 +245,16 @@ function playStroke(s, penUp) {
   p.style.strokeDashoffset = len;
   p.style.transition = `stroke-dashoffset ${dur}ms linear`;
 
-  // 笔尖跟随
-  const ns = "http://www.w3.org/2000/svg";
-  const penXform = penInner.getAttribute("transform") || "translate(0,0)";
-  const total = len;
-  const startT = performance.now();
+  // 先抬笔滑行到本笔起点，再落笔书写
+  await glidePen(p.getPointAtLength(0));
   showPen();
+
+  const startT = performance.now();
   return new Promise((resolve) => {
     function frame(now) {
       const t = Math.min(1, (now - startT) / dur);
-      const pt = p.getPointAtLength(total * t);
-      // 切线方向（取前后两点）
-      const p2 = p.getPointAtLength(Math.min(total, total * t + 2));
-      const ang = (Math.atan2(p2.y - pt.y, p2.x - pt.x) * 180) / Math.PI + 90;
-      penInner.setAttribute("transform", `translate(${pt.x},${pt.y}) rotate(${ang})`);
+      const pt = p.getPointAtLength(len * t);
+      movePen(pt.x, pt.y);
       if (t < 1) {
         requestAnimationFrame(frame);
       } else {
@@ -167,8 +266,41 @@ function playStroke(s, penUp) {
   });
 }
 
-function showPen() { pen.setAttribute("opacity", "1"); }
-function hidePen() { pen.setAttribute("opacity", "0"); }
+/** 静态落笔（无动画）：用于刷新/重连后的历史回放 */
+function drawStrokeInstant(s) {
+  totalStrokes++;
+  if (s.isText) {
+    const g = svgNS("g");
+    g.innerHTML = s.d;
+    if (s.elementId) g.setAttribute("data-element-id", s.elementId);
+    content.appendChild(g);
+    return;
+  }
+  const p = svgNS("path");
+  p.setAttribute("d", s.d);
+  if (s.elementId) p.setAttribute("data-element-id", s.elementId);
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  if (s.fill) {
+    p.setAttribute("fill", s.fill);
+    p.setAttribute("stroke", "none");
+  } else {
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", s.color);
+    p.setAttribute("stroke-width", s.width);
+  }
+  content.appendChild(p);
+}
+
+function renderInstant(strokes) {
+  // 重连时服务器会重放全量历史，先清空避免重复叠加
+  content.innerHTML = "";
+  totalStrokes = 0;
+  for (const s of strokes) drawStrokeInstant(s);
+  progEl.textContent = totalStrokes + " 笔";
+  hidePen();
+  penPos = null;
+}
 
 /** 处理一批笔画（顺序播放） */
 function handleStrokes(strokes) {
@@ -177,7 +309,7 @@ function handleStrokes(strokes) {
       totalStrokes++;
       progEl.textContent = totalStrokes + " 笔";
       labelEl.textContent = "✏️ " + (s.label || "绘制");
-      await playStroke(s, false);
+      await playStroke(s);
     }
     labelEl.textContent = "✅ 本批完成";
   });
@@ -186,12 +318,16 @@ function handleStrokes(strokes) {
 function clearCanvas() {
   content.innerHTML = "";
   totalStrokes = 0;
+  penPos = null;
+  hidePen();
   progEl.textContent = "0 笔";
   labelEl.textContent = "画布已清空";
 }
 
 // ---------- WebSocket 实时接收 ----------
 let ws = null;
+/** 连接后收到的第一批 = 服务器回放的历史内容，直接静态渲染，不重新播放动画 */
+let expectReplay = true;
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -201,27 +337,32 @@ function connect() {
     window.__msgCount = (window.__msgCount || 0) + 1;
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "clear") { clearCanvas(); return; }
+      if (msg.type === "clear") { expectReplay = false; clearCanvas(); return; }
       if (msg.type === "remove") {
-        // 删除元素的所有笔画
+        expectReplay = false;
         content.querySelectorAll(`[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
         labelEl.textContent = `🗑️ 已删除元素 ${msg.elementId}`;
         return;
       }
       if (msg.type === "update") {
-        // 删除旧笔画 + 画新笔画
+        expectReplay = false;
         content.querySelectorAll(`[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
         handleStrokes(msg.strokes.map((s) => ({ ...s, elementId: msg.elementId })));
         return;
       }
-      if (msg.type === "batch") { handleStrokes(msg.strokes); return; }
-      if (msg.type === "stroke") { handleStrokes([msg]); return; }
+      if (msg.type === "batch") {
+        if (expectReplay) { expectReplay = false; renderInstant(msg.strokes); labelEl.textContent = "已恢复画布，等待 AI 动笔…"; return; }
+        handleStrokes(msg.strokes);
+        return;
+      }
+      if (msg.type === "stroke") { expectReplay = false; handleStrokes([msg]); return; }
     } catch (e) {
       window.__lastErr = e.message;
     }
   };
   ws.onclose = () => {
     window.__wsState = "closed";
+    expectReplay = true; // 重连后服务器会再次回放全量历史
     labelEl.textContent = "连接断开，重连中…";
     setTimeout(connect, 1500);
   };

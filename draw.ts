@@ -1058,6 +1058,8 @@ export interface HtmlStroke {
   label: string;
   /** true = 是 text 元素（无轨迹字符 fallback 字体） */
   isText?: boolean;
+  /** true = 填充斜线（合并为一笔整体快速生长，笔尖不跟随） */
+  hatch?: boolean;
   /** 填充色（箭头尖淡色填充） */
   fillOnly?: string;
 }
@@ -1071,6 +1073,8 @@ export interface HandwritingHtml {
 function htmlTextStrokes(text: string, cx: number, cy: number, size: number, color: string, t: SpeedTiming): HtmlStroke[] {
   const strokes: HtmlStroke[] = [];
   for (const seg of layoutSegments(text, cx, size)) {
+    // 纯空白段只占位，不产生笔画（否则每个空格白等 0.4s）
+    if (seg.text.trim() === "") continue;
     if (seg.kind === "hanzi") {
       // 汉字逐笔画（段内逐字排开，避免重叠）
       const chars = Array.from(seg.text);
@@ -1082,11 +1086,12 @@ function htmlTextStrokes(text: string, cx: number, cy: number, size: number, col
         });
       });
     } else {
+      // 拉丁/符号段：手写字体整体渲染（画布端做从左到右的擦除式显出，像被笔带出来）
       strokes.push({
         d: `<text x="${seg.cx.toFixed(1)}" y="${(cy + size * 0.22).toFixed(1)}" text-anchor="middle" dominant-baseline="middle" font-family="${LATIN_FONT}" font-size="${size}" fill="${color}">${esc(seg.text)}</text>`,
         color,
         width: 1,
-        dur: 0.4,
+        dur: Math.min(1.2, 0.35 + seg.text.length * 0.06),
         label: `写 ${seg.text}`,
         isText: true,
       });
@@ -1095,28 +1100,21 @@ function htmlTextStrokes(text: string, cx: number, cy: number, size: number, col
   return strokes;
 }
 
-/** rough 填充拆成单条线 */
+/** rough 填充斜线：合并成一笔（整体快速生长；逐根线画太拖节奏） */
 function htmlFillStrokes(drawable: unknown, fillColor: string, t: SpeedTiming): HtmlStroke[] {
   const d = drawable as { sets?: Array<{ type: string; ops: Array<{ op: string; data: number[] }> }> };
   const set = d.sets?.find((s) => s.type === "fillSketch");
   if (!set) return [];
-  const lines: Array<Array<{ op: string; data: number[] }>> = [];
-  let current: Array<{ op: string; data: number[] }> = [];
-  for (const op of set.ops) {
-    if (op.op === "move" && current.length > 0) {
-      lines.push(current);
-      current = [];
-    }
-    current.push(op);
-  }
-  if (current.length) lines.push(current);
-  return lines.map((ops) => ({
-    d: gen.opsToPath({ type: "fillSketch", ops } as never),
-    color: fillColor,
-    width: 1.3,
-    dur: 0.04,
-    label: "涂色",
-  }));
+  return [
+    {
+      d: gen.opsToPath({ type: "fillSketch", ops: set.ops } as never),
+      color: fillColor,
+      width: 1.3,
+      dur: 0.35,
+      label: "涂色",
+      hatch: true,
+    },
+  ];
 }
 
 /** 生成自包含手写动画 HTML */

@@ -43,6 +43,8 @@ export interface StrokeMsg {
   fill?: string;
   /** 是否是 text 元素（字体渲染，淡入） */
   isText?: boolean;
+  /** 是否是填充斜线（合并为一笔，整体快速生长、笔尖不跟随） */
+  hatch?: boolean;
   /** 笔画结束后笔抬起 */
   penUp?: boolean;
   label: string;

@@ -1,0 +1,4 @@
+node_modules/
+canvas-state.json
+.test-*.ts
+.DS_Store

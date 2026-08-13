@@ -1,0 +1,17 @@
+{
+  "name": "pi-handdraw",
+  "version": "0.1.0",
+  "description": "Hand-drawn style diagram extension for pi: let the AI sketch diagrams with rough.js, render SVG/PNG inline in the TUI, and draw live on a browser canvas",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Codexiaoyi/pi-handdraw.git"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "hanzi-writer-data": "^2.0.1",
+    "roughjs": "^4.6.6",
+    "svg-path-properties": "^2.0.2",
+    "ws": "^8.21.3"
+  }
+}

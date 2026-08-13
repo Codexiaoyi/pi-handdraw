@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>✏️ 实时画布</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: -apple-system, "PingFang SC", sans-serif; }
+  .stage { position: relative; width: 100vw; height: 100vh; background: #fdf6e3; overflow: hidden; }
+  svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  .stroke { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(253,246,227,0.94); border: 1.5px solid #d5c9a8; border-radius: 999px;
+    padding: 6px 18px; font-size: 14px; color: #7d7461;
+    display: flex; gap: 14px; align-items: center; box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 10; user-select: none;
+  }
+  .toast .label { color: #b4562c; font-weight: 600; }
+  .controls {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(253,246,227,0.94); border: 1.5px solid #d5c9a8; border-radius: 999px;
+    padding: 6px 10px; display: flex; gap: 6px; align-items: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 10; user-select: none;
+  }
+  button { border: 1.5px solid #c9bfa6; background: #fdf6e3; color: #6b6350; border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #f3ecd9; }
+  /* 笔尖指示器 */
+  #pen { transition: none; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
+    <g id="content"></g>
+    <!-- 钢笔指示器：笔杆 + 笔尖 -->
+    <g id="pen" opacity="0">
+      <g transform="translate(0,0)">
+        <rect x="-3" y="-24" width="6" height="20" rx="2" fill="#c0392b"/>
+        <polygon points="0,20 4,4 -4,4" fill="#8e44ad"/>
+        <polygon points="-1.5,-24 1.5,-24 3,0 -3,0" fill="#f1c40f"/>
+        <circle cx="0" cy="-26" r="2.4" fill="#34495e"/>
+      </g>
+    </g>
+  </svg>
+  <div class="toast"><span class="label" id="curLabel">等待 AI 动笔…</span><span id="progress">0 笔</span></div>
+  <div class="controls">
+    <button onclick="resetView()">适应</button>
+    <button onclick="location.reload()">刷新</button>
+    <button onclick="clearCanvas()">清空</button>
+    <span style="color:#a89d85">滚轮缩放 · 拖拽平移 · 实时连接</span>
+  </div>
+</div>
+<script>
+// ---------- 无限画布 ----------
+const svg = document.getElementById("canvas");
+const content = document.getElementById("content");
+const pen = document.getElementById("pen");
+const penInner = pen.firstElementChild;
+const labelEl = document.getElementById("curLabel");
+const progEl = document.getElementById("progress");
+let vb = { x: 0, y: 0, w: 800, h: 500 };
+function applyView() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
+function resetView() {
+  const r = svg.getBoundingClientRect();
+  const W = vb.w, H = vb.h;
+  const ratio = r.width / r.height;
+  let w = W, h = H;
+  if (W / H > ratio) { h = H; w = H * ratio; } else { w = W; h = W / ratio; }
+  vb = { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  applyView();
+}
+let drag = null;
+svg.addEventListener("mousedown", (e) => { drag = { sx: e.clientX, sy: e.clientY, vx: vb.x, vy: vb.y }; svg.style.cursor = "grabbing"; });
+window.addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  const r = svg.getBoundingClientRect();
+  vb.x = drag.vx - ((e.clientX - drag.sx) * vb.w) / r.width;
+  vb.y = drag.vy - ((e.clientY - drag.sy) * vb.h) / r.height;
+  applyView();
+});
+window.addEventListener("mouseup", () => { drag = null; svg.style.cursor = ""; });
+svg.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = svg.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const fx = vb.x + (mx * vb.w) / r.width;
+  const fy = vb.y + (my * vb.h) / r.height;
+  const f = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+  const nw = vb.w * f, nh = vb.h * f;
+  if (nw < 50 || nw > 800000) return;
+  vb.x = fx - (mx * nw) / r.width;
+  vb.y = fy - (my * nh) / r.height;
+  vb.w = nw; vb.h = nh;
+  applyView();
+}, { passive: false });
+applyView();
+
+// ---------- 笔画播放 + 笔尖跟随 ----------
+let totalStrokes = 0;
+let queue = Promise.resolve();
+
+function svgNS(tag) { return document.createElementNS("http://www.w3.org/2000/svg", tag); }
+
+/** 播放单个笔画（写出来 + 笔尖跟随） */
+function playStroke(s, penUp) {
+  const dur = Math.max(80, s.dur || 300);
+  // 淡入文字
+  if (s.isText) {
+    const g = svgNS("g");
+    g.innerHTML = s.d;
+    if (s.elementId) g.setAttribute("data-element-id", s.elementId);
+    g.style.opacity = "0";
+    g.style.transition = "opacity 0.4s";
+    content.appendChild(g);
+    requestAnimationFrame(() => { g.style.opacity = "1"; });
+    hidePen();
+    return;
+  }
+  const p = svgNS("path");
+  p.setAttribute("d", s.d);
+  if (s.elementId) p.setAttribute("data-element-id", s.elementId);
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", s.fill || s.color);
+  p.setAttribute("stroke-width", s.width);
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  if (s.fill) {
+    p.setAttribute("fill", s.fill);
+    p.setAttribute("stroke", "none");
+    p.style.opacity = "0";
+    p.style.transition = `opacity ${dur}ms`;
+    content.appendChild(p);
+    requestAnimationFrame(() => { p.style.opacity = "1"; });
+    hidePen();
+    return new Promise(r => setTimeout(r, dur));
+  }
+  content.appendChild(p);
+
+  const len = p.getTotalLength();
+  // dash 生长动画
+  p.style.strokeDasharray = len;
+  p.style.strokeDashoffset = len;
+  p.style.transition = `stroke-dashoffset ${dur}ms linear`;
+
+  // 笔尖跟随
+  const ns = "http://www.w3.org/2000/svg";
+  const penXform = penInner.getAttribute("transform") || "translate(0,0)";
+  const total = len;
+  const startT = performance.now();
+  showPen();
+  return new Promise((resolve) => {
+    function frame(now) {
+      const t = Math.min(1, (now - startT) / dur);
+      const pt = p.getPointAtLength(total * t);
+      // 切线方向（取前后两点）
+      const p2 = p.getPointAtLength(Math.min(total, total * t + 2));
+      const ang = (Math.atan2(p2.y - pt.y, p2.x - pt.x) * 180) / Math.PI + 90;
+      penInner.setAttribute("transform", `translate(${pt.x},${pt.y}) rotate(${ang})`);
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        p.style.strokeDashoffset = 0;
+        resolve();
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+function showPen() { pen.setAttribute("opacity", "1"); }
+function hidePen() { pen.setAttribute("opacity", "0"); }
+
+/** 处理一批笔画（顺序播放） */
+function handleStrokes(strokes) {
+  queue = queue.then(async () => {
+    for (const s of strokes) {
+      totalStrokes++;
+      progEl.textContent = totalStrokes + " 笔";
+      labelEl.textContent = "✏️ " + (s.label || "绘制");
+      await playStroke(s, false);
+    }
+    labelEl.textContent = "✅ 本批完成";
+  });
+}
+
+function clearCanvas() {
+  content.innerHTML = "";
+  totalStrokes = 0;
+  progEl.textContent = "0 笔";
+  labelEl.textContent = "画布已清空";
+}
+
+// ---------- WebSocket 实时接收 ----------
+let ws = null;
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  window.__wsState = "connecting";
+  ws.onopen = () => { window.__wsState = "open"; labelEl.textContent = "等待 AI 动笔…"; };
+  ws.onmessage = (ev) => {
+    window.__msgCount = (window.__msgCount || 0) + 1;
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "clear") { clearCanvas(); return; }
+      if (msg.type === "remove") {
+        // 删除元素的所有笔画
+        content.querySelectorAll(`[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
+        labelEl.textContent = `🗑️ 已删除元素 ${msg.elementId}`;
+        return;
+      }
+      if (msg.type === "update") {
+        // 删除旧笔画 + 画新笔画
+        content.querySelectorAll(`[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
+        handleStrokes(msg.strokes.map((s) => ({ ...s, elementId: msg.elementId })));
+        return;
+      }
+      if (msg.type === "batch") { handleStrokes(msg.strokes); return; }
+      if (msg.type === "stroke") { handleStrokes([msg]); return; }
+    } catch (e) {
+      window.__lastErr = e.message;
+    }
+  };
+  ws.onclose = () => {
+    window.__wsState = "closed";
+    labelEl.textContent = "连接断开，重连中…";
+    setTimeout(connect, 1500);
+  };
+  ws.onerror = () => { window.__wsState = "error"; ws.close(); };
+}
+connect();
+</script>
+</body>
+</html>

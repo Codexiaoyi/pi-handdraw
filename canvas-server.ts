@@ -184,6 +184,12 @@ export class CanvasServer {
           });
           return;
         }
+        if (req.method === "POST" && req.url === "/api/clear") {
+          this.clear();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ...this.getSummary() }));
+          return;
+        }
         if (req.method === "POST" && (req.url === "/api/update" || req.url === "/api/remove")) {
           let body = "";
           req.on("data", (c) => (body += c));

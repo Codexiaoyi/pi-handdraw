@@ -211,17 +211,19 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Draw incrementally on a live canvas with a pen indicator (one call = a few strokes)",
     promptGuidelines: [
       "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
+      "BEFORE the first draw of a new diagram, ALWAYS call action \"status\" first. If the canvas already has content, start the new diagram at the recommended freeSpots (prefer 内容右侧, keep the gap) so it sits side by side with existing diagrams — never draw over occupied regions.",
       "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
       "实时画图时：一次只画 1-2 个元素（比如先画一个框，再画它的文字），这样用户可以看着笔一笔一笔画。",
       "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
       "For a container/module box that holds other elements inside, set textPosition \"top\" so its title sits at the top of the box, and place inner content below y+50. NEVER put a container title in the box center and then draw content over it.",
       "Each heading/label must be exactly ONE text element — never repeat the same text at multiple positions.",
       "After drawing a few elements, check the returned summary to place the next ones without overlap.",
+      "Only use action \"clear\" when the user explicitly asks to wipe/reset the canvas (清空/重画). Never clear on your own — old diagrams must be preserved.",
     ],
     parameters: Type.Object({
       action: Type.Optional(
-        Type.Union([Type.Literal("draw"), Type.Literal("update"), Type.Literal("remove"), Type.Literal("status")], {
-          description: "draw=画新元素（默认）；update=修改已有元素（用 elementId）；remove=删除元素；status=只查询画布状态",
+        Type.Union([Type.Literal("draw"), Type.Literal("update"), Type.Literal("remove"), Type.Literal("status"), Type.Literal("clear")], {
+          description: "draw=画新元素（默认）；update=修改已有元素（用 elementId）；remove=删除元素；status=只查询画布状态；clear=清空整个画布（仅用户明确要求时用）",
         })
       ),
       elementId: Type.Optional(Type.String({ description: "要修改/删除的元素 ID（从上次返回的摘要或 occupied 列表获取）" })),
@@ -233,12 +235,25 @@ export default function (pi: ExtensionAPI) {
         elementId?: string;
         elements: Array<{ type: string } & Record<string, unknown>>;
       };
-      const action = (params.action ?? "draw") as "draw" | "update" | "remove" | "status";
+      const action = (params.action ?? "draw") as "draw" | "update" | "remove" | "status" | "clear";
       const url = await ensureCanvasServer(ctx);
       if (!url) {
         return {
           content: [{ type: "text", text: `❌ 无法启动实时画布服务器。` }],
           details: { ok: false },
+        };
+      }
+
+      if (action === "clear") {
+        const server = getCanvasServer();
+        if (canvasServerMode === "remote") {
+          await fetch(`http://localhost:${server.getPort()}/api/clear`, { method: "POST" });
+        } else {
+          server.clear();
+        }
+        return {
+          content: [{ type: "text", text: "🧹 画布已清空。" }],
+          details: { ok: true, elementCount: 0 },
         };
       }
 

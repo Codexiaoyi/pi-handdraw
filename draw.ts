@@ -24,8 +24,10 @@ export interface BoxLikeElement {
   /** 尺寸（默认 160x70） */
   w?: number;
   h?: number;
-  /** 形状内文字，自动居中 */
+  /** 形状内文字，默认居中；textPosition="top" 时贴框内顶部（容器/模块框的标题用） */
   text?: string;
+  /** 文字位置：center=居中（默认，叶子节点用）；top=框内顶部（容器/模块框用，内容从标题下方开始排） */
+  textPosition?: "center" | "top";
   /** 描边颜色 */
   color?: string;
   /** 填充颜色 */
@@ -152,6 +154,11 @@ function textSvg(x: number, y: number, text: string, size: number, color: string
 // 图形渲染
 // ---------------------------------------------------------------------------
 
+/** 盒内文字的中心 y：center=几何中心；top=容器标题（贴框内顶部，下方留内容区） */
+function boxTextCY(el: BoxLikeElement, y: number, h: number, size: number): number {
+  return el.textPosition === "top" ? y + 10 + size * 0.7 : y + h / 2;
+}
+
 function renderBox(el: BoxLikeElement, seed: number): string {
   const x = el.x ?? 0;
   const y = el.y ?? 0;
@@ -176,7 +183,7 @@ function renderBox(el: BoxLikeElement, seed: number): string {
   if (el.text) {
     // 文字用笔画书写（汉字按笔顺渲染，无笔画数据的字符 fallback 字体）；超出盒子自动缩小
     const size = fitTextSize(el.text, w, h, el.textSize ?? 22);
-    const strokeParts = textParts(el.text, x + w / 2, y + h / 2, size, el.color ?? "#263238", 1, 0);
+    const strokeParts = textParts(el.text, x + w / 2, boxTextCY(el, y, h, size), size, el.color ?? "#263238", 1, 0);
     strokeParts.forEach((p) => parts.push(p.render(1)));
   }
   return parts.join("");
@@ -568,7 +575,7 @@ function boxTextParts(el: BoxLikeElement, t: SpeedTiming): AnimPart[] {
   const h = el.h ?? 70;
   const size = fitTextSize(el.text, w, h, el.textSize ?? 22);
   const cx = x + w / 2;
-  const cy = y + h / 2;
+  const cy = boxTextCY(el, y, h, size);
   const color = el.color ?? "#263238";
   return textParts(el.text, cx, cy, size, color, t.strokeFrames, t.strokeInterval);
 }
@@ -900,7 +907,7 @@ function elementRasterParts(el: HandDrawElement, t: SpeedTiming, elIndex: number
     if (el.text) {
       const size = el.textSize ?? 22;
       const cx = x + w / 2;
-      const cy = y + h / 2;
+      const cy = boxTextCY(el, y, h, size);
       parts.push(...textRasterParts(el.text, cx, cy, size, el.color ?? "#263238", t));
     }
     return parts;
@@ -1176,9 +1183,9 @@ export function buildStrokeSequence(
         if (el.fill) strokes.push(...htmlFillStrokes(gen.ellipse(cx, cy, w, h, roughOptions(color, el.fill, el.fillStyle, sd + 100)), el.fill, t));
       }
       if (el.text) {
-        // 文字超出盒子时自动缩小字号
+        // 文字超出盒子时自动缩小字号；textPosition="top" 时贴框内顶部（容器标题）
         const size = fitTextSize(el.text, w, h, el.textSize ?? 22);
-        strokes.push(...htmlTextStrokes(el.text, x + w / 2, y + h / 2, size, el.color ?? "#263238", t));
+        strokes.push(...htmlTextStrokes(el.text, x + w / 2, boxTextCY(el, y, h, size), size, el.color ?? "#263238", t));
       }
     } else if (el.type === "line") {
       const line = gen.linearPath(

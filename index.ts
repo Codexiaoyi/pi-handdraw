@@ -24,7 +24,13 @@ const boxLike = (literal: "box" | "ellipse" | "diamond") =>
     y: Type.Number({ description: "左上角 y（画布绝对坐标）" }),
     w: Type.Optional(Type.Number({ description: "宽度，默认 160" })),
     h: Type.Optional(Type.Number({ description: "高度，默认 70" })),
-    text: Type.Optional(Type.String({ description: "形状内文字，自动居中" })),
+    text: Type.Optional(Type.String({ description: "形状内文字，默认居中" })),
+    textPosition: Type.Optional(
+      Type.Union([Type.Literal("center"), Type.Literal("top")], {
+        description:
+          "文字位置：center=居中（默认，叶子节点用）；top=框内顶部（容器/模块框的标题用，此时框内其他内容从 y+50 以下开始排，不要覆盖标题）",
+      })
+    ),
     color: Type.Optional(Type.String({ description: "描边颜色，如 #c0392b" })),
     fill: Type.Optional(Type.String({ description: "填充颜色，如 #fdebd0" })),
     fillStyle: Type.Optional(
@@ -208,6 +214,7 @@ export default function (pi: ExtensionAPI) {
       "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
       "实时画图时：一次只画 1-2 个元素（比如先画一个框，再画它的文字），这样用户可以看着笔一笔一笔画。",
       "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
+      "For a container/module box that holds other elements inside, set textPosition \"top\" so its title sits at the top of the box, and place inner content below y+50. NEVER put a container title in the box center and then draw content over it.",
       "Each heading/label must be exactly ONE text element — never repeat the same text at multiple positions.",
       "After drawing a few elements, check the returned summary to place the next ones without overlap.",
     ],

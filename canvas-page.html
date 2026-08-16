@@ -175,6 +175,67 @@
   }
   @keyframes march { to { stroke-dashoffset: -10; } }
   @media (prefers-reduced-motion: reduce) { .sel-rect { animation: none; } }
+  /* ---------- 选中高亮：外圈苗边 + 柔光呼吸（不作用于原对象本身） ---------- */
+  .sel-ring {
+    fill: none;
+    stroke: #6c8cff;
+    stroke-width: 2;
+    rx: 8;
+    pointer-events: none;
+    animation: ringBreathe 1.8s ease-in-out infinite;
+  }
+  @keyframes ringBreathe {
+    0%, 100% {
+      stroke-width: 1.6;
+      stroke-opacity: 0.7;
+      filter: drop-shadow(0 0 2px rgba(108, 140, 255, 0.35));
+    }
+    50% {
+      stroke-width: 3;
+      stroke-opacity: 1;
+      filter: drop-shadow(0 0 6px rgba(108, 140, 255, 0.65));
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sel-ring { animation: none; }
+  }
+  /* ---------- 双击说明浮窗 ---------- */
+  .desc-pop {
+    position: fixed;
+    background: rgba(255, 255, 255, 0.96);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+    border: 1px solid rgba(108, 140, 255, 0.35);
+    border-radius: 10px;
+    padding: 12px 16px;
+    box-shadow: 0 8px 28px rgba(108, 140, 255, 0.25), 0 2px 6px rgba(16, 24, 40, 0.08);
+    z-index: 20;
+    max-width: 280px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #171b21;
+    animation: popIn 0.18s ease-out;
+  }
+  .desc-pop .desc-title {
+    font-size: 11px;
+    color: #6c8cff;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .desc-pop .desc-body { color: #171b21; }
+  .desc-pop .desc-order {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(108, 140, 255, 0.25);
+    font-size: 11px;
+    color: #6b7280;
+  }
+  @keyframes popIn {
+    from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
   .sel-chip { top: 16px; left: 16px; transform: none; padding: 6px 8px 6px 12px; gap: 6px; }
   .sel-chip .sel-label {
     font-size: 12px; color: var(--ink); max-width: 240px;
@@ -332,6 +393,14 @@ function resetView() {
 }
 let drag = null;
 svg.addEventListener("mousedown", (e) => { drag = { sx: e.clientX, sy: e.clientY, vx: vb.x, vy: vb.y }; svg.style.cursor = "grabbing"; });
+// 双击元素 → 弹出说明浮窗
+svg.addEventListener("dblclick", (e) => {
+  let g = e.target && e.target.closest ? e.target.closest("g.el") : null;
+  if (!g || !content.contains(g)) g = pickElementAt(e.clientX, e.clientY);
+  if (!g) return;
+  selectElement(g); // 双击先选中
+  showDescPop(e.clientX, e.clientY);
+});
 window.addEventListener("mousemove", (e) => {
   if (!drag) return;
   const r = svg.getBoundingClientRect();
@@ -626,24 +695,25 @@ function deselect() {
   selectedId = null;
   overlay.innerHTML = "";
   selChip.hidden = true;
+  hideDescPop();
 }
 
 async function selectElement(g) {
   const id = g.getAttribute("data-element-id");
   if (!id) return;
   selectedId = id;
-  // 蚂蚁线高亮框（在 SVG 坐标系内，随缩放平移自动跟随）
+  // 在 overlay 里加一圈苗边（不遮挡原对象，外圈光晕同步呼吸由 CSS 负责）
   const bb = g.getBBox();
-  const pad = 6;
+  const pad = 8;
   overlay.innerHTML = "";
-  const r = svgNS("rect");
-  r.setAttribute("x", bb.x - pad);
-  r.setAttribute("y", bb.y - pad);
-  r.setAttribute("width", bb.width + pad * 2);
-  r.setAttribute("height", bb.height + pad * 2);
-  r.setAttribute("rx", "6");
-  r.setAttribute("class", "sel-rect");
-  overlay.appendChild(r);
+  const ring = svgNS("rect");
+  ring.setAttribute("x", bb.x - pad);
+  ring.setAttribute("y", bb.y - pad);
+  ring.setAttribute("width", bb.width + pad * 2);
+  ring.setAttribute("height", bb.height + pad * 2);
+  ring.setAttribute("rx", "8");
+  ring.setAttribute("class", "sel-ring");
+  overlay.appendChild(ring);
   // 元素 label/type（客户端只有笔画，元数据从 /state 取）
   if (!elMetaCache) {
     elMetaCache = {};
@@ -655,12 +725,53 @@ async function selectElement(g) {
   }
   if (selectedId !== id) return; // 等待期间已改选/取消
   const meta = elMetaCache[id];
-  selLabel.textContent = (meta?.label || meta?.type || "元素") + " ";
+  // 优先取 desc（agent 写的自然语言说明），没有再 fallback
+  const displayLabel = (meta?.meta && meta.meta.desc) || meta?.label || meta?.type || "元素";
+  selLabel.textContent = displayLabel + " ";
   const idSpan = document.createElement("span");
   idSpan.className = "sel-id";
   idSpan.textContent = id;
   selLabel.appendChild(idSpan);
   selChip.hidden = false;
+}
+
+/** 双击元素 → 弹出说明浮窗 */
+let descPopEl = null;
+function showDescPop(clientX, clientY) {
+  hideDescPop();
+  if (!selectedId) return;
+  const meta = elMetaCache?.[selectedId];
+  if (!meta) return;
+  // 优先取 meta.desc（agent 写的说明），没有再 fallback
+  const desc = (meta.meta && meta.meta.desc) || meta.label || meta.type || "无说明";
+  const order = meta.z ?? "—";
+  const id = selectedId;
+  const pop = document.createElement("div");
+  pop.className = "desc-pop";
+  pop.innerHTML = `
+    <div class="desc-title">对象说明</div>
+    <div class="desc-body">${escHtml(desc)}</div>
+    <div class="desc-order">画图顺序 #${order} · ID: ${escHtml(id)}</div>
+  `;
+  // 屏幕坐标定位，避免溢出
+  pop.style.left = Math.min(clientX + 12, window.innerWidth - 300) + "px";
+  pop.style.top = Math.min(clientY + 12, window.innerHeight - 140) + "px";
+  document.body.appendChild(pop);
+  descPopEl = pop;
+  // 4 秒后或点击外部自动消失
+  setTimeout(() => { if (descPopEl === pop) hideDescPop(); }, 6000);
+  const onClick = (e) => {
+    if (pop.contains(e.target)) return;
+    hideDescPop();
+    document.removeEventListener("mousedown", onClick);
+  };
+  setTimeout(() => document.addEventListener("mousedown", onClick), 0);
+}
+function hideDescPop() {
+  if (descPopEl) { descPopEl.remove(); descPopEl = null; }
+}
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 document.getElementById("selClose").addEventListener("click", deselect);

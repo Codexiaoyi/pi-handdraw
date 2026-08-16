@@ -36,6 +36,8 @@ export interface BoxLikeElement {
   /** 填充风格：hachure(手绘斜线) | solid | zigzag | cross-hatch */
   fillStyle?: string;
   textSize?: number;
+  /** agent 画这个对象时写的说明（自然语言描述，如"用户登录入口"），双击浮窗展示 */
+  desc?: string;
   /** 叠放层次：小的在下面；不设则后画的在上 */
   z?: number;
 }

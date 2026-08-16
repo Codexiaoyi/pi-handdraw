@@ -249,28 +249,31 @@ function compactMeta(meta: Record<string, unknown>): Record<string, unknown> | u
 /** 元素 → 位置与元数据摘要（AI 判断空位、status 展示用） */
 function toElementInfo(el: HandDrawElement): CanvasElementInfo {
   const z = el.z;
+  // 取出 agent 写入时填的说明（任意元素都可带 desc，没有时 fallback 到 text）
+  const anyEl = el as { desc?: string };
+  const desc = anyEl.desc ?? ("text" in el && el.text) ?? ("name" in el && el.name) ?? undefined;
   if (el.type === "box" || el.type === "ellipse" || el.type === "diamond") {
     return {
       type: el.type,
-      label: el.text,
+      label: desc,
       x: el.x ?? 0,
       y: el.y ?? 0,
       w: el.w ?? 160,
       h: el.h ?? 70,
       z,
-      meta: compactMeta({ text: el.text, color: el.color, fill: el.fill, textSize: el.textSize, textPosition: el.textPosition }),
+      meta: compactMeta({ desc, text: el.text, color: el.color, fill: el.fill, textSize: el.textSize, textPosition: el.textPosition }),
     } as CanvasElementInfo;
   }
   if (el.type === "line" || el.type === "arrow") {
     return {
       type: el.type,
-      label: el.type === "arrow" ? el.text : undefined,
+      label: desc,
       x: Math.min(el.x1, el.x2),
       y: Math.min(el.y1, el.y2),
       w: Math.abs(el.x2 - el.x1),
       h: Math.abs(el.y2 - el.y1),
       z,
-      meta: compactMeta({ text: el.text, color: el.color, from: [el.x1, el.y1], to: [el.x2, el.y2] }),
+      meta: compactMeta({ desc, text: el.text, color: el.color, from: [el.x1, el.y1], to: [el.x2, el.y2] }),
     } as CanvasElementInfo;
   }
   if (el.type === "text") {
@@ -279,26 +282,26 @@ function toElementInfo(el: HandDrawElement): CanvasElementInfo {
       const layout = layoutParagraph(el.text, size, el.w, el.lineHeight ?? 1.6);
       return {
         type: "text",
-        label: el.text.slice(0, 24),
+        label: desc,
         x: el.x,
         y: el.y,
         w: el.w ?? layout.width,
         h: layout.height,
         z,
-        meta: compactMeta({ text: el.text, size, color: el.color, align: el.align, lineHeight: el.lineHeight, lines: layout.lines.length }),
+        meta: compactMeta({ desc, text: el.text, size, color: el.color, align: el.align, lineHeight: el.lineHeight, lines: layout.lines.length }),
       };
     }
     const w = measureText(el.text, size);
     const h = size * 1.35;
     return {
       type: "text",
-      label: el.text.slice(0, 24),
+      label: desc,
       x: el.x - w / 2,
       y: el.y - h / 2,
       w,
       h,
       z,
-      meta: compactMeta({ text: el.text, size, color: el.color }),
+      meta: compactMeta({ desc, text: el.text, size, color: el.color }),
     };
   }
   if (el.type === "sticker") {
@@ -311,12 +314,12 @@ function toElementInfo(el: HandDrawElement): CanvasElementInfo {
       w: size,
       h: size,
       z,
-      meta: compactMeta({ name: el.name, size, color: el.color }),
+      meta: compactMeta({ desc, name: el.name, size, color: el.color }),
     };
   }
   // path
   const bb = pathBBox(el.d);
-  return { type: "path", x: bb.x, y: bb.y, w: bb.w, h: bb.h, z, meta: compactMeta({ color: el.color, fill: el.fill }) };
+  return { type: "path", label: desc, x: bb.x, y: bb.y, w: bb.w, h: bb.h, z, meta: compactMeta({ desc, color: el.color, fill: el.fill }) };
 }
 
 /** 用默认浏览器打开 URL（macOS/Linux/Windows） */

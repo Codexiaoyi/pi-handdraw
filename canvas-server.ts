@@ -377,6 +377,13 @@ export class CanvasServer {
             res.end(JSON.stringify(this.getSummary(this.boardOf(url))));
             return;
           }
+          if (url.pathname === "/api/strokes") {
+            // 全量笔画：页面静默整体重绘用（agent 任务结束后清前端残留）
+            const b = this.getBoard(this.boardOf(url));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ strokes: b.replayCache }));
+            return;
+          }
           if (url.pathname === "/api/boards" && req.method === "GET") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ active: this.activeBoard, boards: this.listBoards() }));

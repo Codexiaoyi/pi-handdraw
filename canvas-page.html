@@ -402,6 +402,7 @@ async function initBoard() {
     }
   } catch { if (!board) board = "default"; }
   boardNameEl.textContent = tr("board") + " · " + board;
+  restoreView(); // 恢复该画板上次的视角
   connect();
 }
 function switchBoard(name) {
@@ -419,6 +420,27 @@ const wsDot = document.getElementById("wsDot");
 const controlsEl = document.querySelector(".controls");
 let vb = { x: 0, y: 0, w: 800, h: 500 };
 function applyView() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
+
+// ---------- 视角保存：每个画板记住上次的 viewBox，刷新/重进后恢复 ----------
+function viewKey() { return "handdraw-view:" + board; }
+let viewSaveTimer = null;
+function scheduleSaveView() {
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = setTimeout(() => {
+    try { localStorage.setItem(viewKey(), JSON.stringify(vb)); } catch { /* ignore */ }
+  }, 250);
+}
+function restoreView() {
+  try {
+    const raw = localStorage.getItem(viewKey());
+    if (!raw) return;
+    const v = JSON.parse(raw);
+    if ([v.x, v.y, v.w, v.h].every((n) => Number.isFinite(n)) && v.w >= 50 && v.w <= 800000 && v.h > 0) {
+      vb = v;
+      applyView();
+    }
+  } catch { /* ignore */ }
+}
 function resetView() {
   const r = svg.getBoundingClientRect();
   const W = vb.w, H = vb.h;
@@ -444,6 +466,7 @@ window.addEventListener("mousemove", (e) => {
   vb.x = drag.vx - ((e.clientX - drag.sx) * vb.w) / r.width;
   vb.y = drag.vy - ((e.clientY - drag.sy) * vb.h) / r.height;
   applyView();
+  scheduleSaveView();
 });
 window.addEventListener("mouseup", (e) => {
   if (drag) {
@@ -489,24 +512,25 @@ svg.addEventListener("wheel", (e) => {
   vb.y = fy - (my * nh) / r.height;
   vb.w = nw; vb.h = nh;
   applyView();
+  scheduleSaveView();
 }, { passive: false });
 applyView();
 
 // ---------- z-order：每个元素一个 <g>，按 z 排序插入 ----------
-function elGroup(elementId, z) {
+function elGroup(elementId, z, root = content) {
   const id = elementId || "";
-  let g = content.querySelector(`g.el[data-element-id="${id}"]`);
+  let g = root.querySelector(`g.el[data-element-id="${id}"]`);
   if (g) return g;
   g = svgNS("g");
   g.setAttribute("class", "el");
   g.setAttribute("data-element-id", id);
   g.dataset.z = z == null ? "" : String(z);
   const zz = z == null ? Infinity : z;
-  for (const other of content.querySelectorAll("g.el")) {
+  for (const other of root.querySelectorAll("g.el")) {
     const oz = other.dataset.z === "" ? Infinity : Number(other.dataset.z);
-    if (oz > zz) { content.insertBefore(g, other); return g; }
+    if (oz > zz) { root.insertBefore(g, other); return g; }
   }
-  content.appendChild(g);
+  root.appendChild(g);
   return g;
 }
 
@@ -658,9 +682,9 @@ async function playStroke(s) {
 }
 
 /** 静态落笔（无动画）：用于刷新/重连后的历史回放 */
-function drawStrokeInstant(s) {
+function drawStrokeInstant(s, root = content) {
   totalStrokes++;
-  const group = elGroup(s.elementId, s.z);
+  const group = elGroup(s.elementId, s.z, root);
   if (s.isText) {
     const g = svgNS("g");
     g.innerHTML = s.d;
@@ -684,6 +708,7 @@ function drawStrokeInstant(s) {
 
 function renderInstant(strokes) {
   // 重连时服务器会重放全量历史，先清空避免重复叠加
+  strokeSeq++;
   content.innerHTML = "";
   totalStrokes = 0;
   for (const s of strokes) drawStrokeInstant(s);
@@ -692,8 +717,43 @@ function renderInstant(strokes) {
   penPos = null;
 }
 
+// ---------- 静默整体刷新：agent 任务结束后重绘全部内容，清掉前端残留 ----------
+/** 笔画版本号：fetch 期间若有新笔画到达则放弃本次刷新（下一次 agent 结束还会再刷） */
+let strokeSeq = 0;
+let refreshQueued = false;
+function scheduleSilentRefresh() {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  // 排在笔画播放队列后面：等正在播放的动画画完再刷，用户无感知
+  queue = queue.then(() => {
+    refreshQueued = false;
+    return silentRefresh();
+  });
+}
+async function silentRefresh() {
+  try {
+    const seq = strokeSeq;
+    const res = await fetch("/api/strokes?board=" + encodeURIComponent(board));
+    const data = await res.json();
+    if (!Array.isArray(data.strokes)) return;
+    if (seq !== strokeSeq) return;
+    deselect();
+    // 先在屏外分组里渲染完，再一次同步替换，避免闪烁
+    totalStrokes = 0;
+    const tmp = svgNS("g");
+    for (const s of data.strokes) drawStrokeInstant(s, tmp);
+    content.innerHTML = "";
+    while (tmp.firstChild) content.appendChild(tmp.firstChild);
+    progEl.textContent = totalStrokes + tr("strokeUnit");
+    hidePen();
+    penPos = null;
+    elMetaCache = null;
+  } catch { /* 静默刷新失败不影响使用 */ }
+}
+
 /** 处理一批笔画（顺序播放），播放期间淡出底栏避免遮挡 */
 function handleStrokes(strokes) {
+  strokeSeq++;
   queue = queue.then(async () => {
     controlsEl.classList.add("dim");
     try {
@@ -712,6 +772,7 @@ function handleStrokes(strokes) {
 }
 
 function clearCanvas() {
+  strokeSeq++;
   content.innerHTML = "";
   totalStrokes = 0;
   penPos = null;
@@ -839,6 +900,8 @@ document.getElementById("selQuote").addEventListener("click", () => {
 let ws = null;
 /** Agent 工作呼吸灯：思考+作画期间点亮（AIPex 风格三点脉冲 + 整页呼吸光环） */
 const agentPulse = document.getElementById("agentPulse");
+/** 本页面观察到过 agent 工作才触发结束后的静默刷新（连接时的状态同步不触发） */
+let sawAgentWorking = false;
 function setAgentLight(working) {
   document.body.classList.toggle("agent-working", working);
   agentPulse.hidden = !working;
@@ -854,7 +917,12 @@ function connect() {
     window.__msgCount = (window.__msgCount || 0) + 1;
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "agent") { setAgentLight(!!msg.working); return; }
+      if (msg.type === "agent") {
+        setAgentLight(!!msg.working);
+        if (msg.working) sawAgentWorking = true;
+        else if (sawAgentWorking) { sawAgentWorking = false; scheduleSilentRefresh(); }
+        return;
+      }
       elMetaCache = null; // 画布有变动，元素元数据缓存失效
       if (msg.type === "clear") { expectReplay = false; clearCanvas(); return; }
       if (msg.type === "remove") {

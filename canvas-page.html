@@ -182,8 +182,8 @@
   }
   .sel-chip .sel-id { color: var(--muted); }
   #selDelete:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
-  /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动） */
-  #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); }
+  /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动；仅透明度用过渡做淡出） */
+  #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); transition: opacity 0.45s ease; }
 </style>
 </head>
 <body>
@@ -409,8 +409,8 @@ let totalStrokes = 0;
 let queue = Promise.resolve();
 let wipeSeq = 0;
 
-/** 固定握笔倾角：真实书写时笔的角度基本不变，随路径切线旋转会剧烈抖动 */
-const PEN_ANGLE = -30;
+/** 固定握笔倾角：真实书写时笔的角度基本不变，随路径切线旋转会剧烈抖动。右倾 30° */
+const PEN_ANGLE = 30;
 /** 笔尖当前位置（画布坐标），用于笔画间的抬笔滑行 */
 let penPos = null;
 
@@ -598,6 +598,7 @@ function handleStrokes(strokes) {
         await playStroke(s);
       }
       labelEl.textContent = tr("batchDone");
+      hidePen(); // 本批画完，抬笔淡出（CSS opacity 过渡）
     } finally {
       controlsEl.classList.remove("dim");
     }

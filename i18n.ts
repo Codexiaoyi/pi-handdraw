@@ -25,6 +25,7 @@ const zh: Dict = {
   "tool.guidelines": [
     "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
     "BEFORE the first draw of a new diagram, ALWAYS call action \"status\" first. If the canvas already has content, start the new diagram at the recommended freeSpots (prefer 内容右侧, keep the gap) so it sits side by side with existing diagrams — never draw over occupied regions.",
+    "严禁覆盖已有内容：新元素与已占用区域发生部分重叠会被直接拒绝（返回冲突清单）。容器包含子元素、底色块垫文字这类完全包含关系不受限制；只有确有意的覆盖才允许传 allowOverlap: true。",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
     "实时画图时：一次只画 1-2 个元素（比如先画一个框，再画它的文字），这样用户可以看着笔一笔一笔画。",
     "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
@@ -43,6 +44,9 @@ const zh: Dict = {
   "tool.removeNeedId": "remove 需要 elementId。",
   "tool.elNotFound": "❌ 元素 {id} 不存在。可用 status 查看当前元素 ID。",
   "tool.stickerUnknown": "⚠️ 未知贴纸「{name}」，已跳过（可用贴纸见 status 返回的 stickers 列表）。",
+  "tool.overlap":
+    "❌ 拒绝绘制：以下新元素会覆盖已有内容：{hits}。\n" +
+    "请参照空位（{spots}）重新排布后重试。完全包含关系（容器装子元素/底色块垫文字）不会被拦截；若确实需要有意的覆盖，传 allowOverlap: true。",
   "tool.status":
     "当前画板「{board}」（目录 {dir}）：{count} 个元素。\n" +
     "已画：{occupied}\n" +
@@ -105,6 +109,7 @@ const en: Dict = {
   "tool.guidelines": [
     "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
     "BEFORE the first draw of a new diagram, ALWAYS call action \"status\" first. If the canvas already has content, start the new diagram at the recommended freeSpots (prefer right of the content, keep the gap) so it sits side by side with existing diagrams — never draw over occupied regions.",
+    "NEVER cover existing content: a new element partially overlapping any occupied region is rejected outright (you get the collision list). Full containment (child inside a container, a background block under text) is allowed; pass allowOverlap: true only when the overlap is truly intentional.",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
     "When drawing live, draw only 1-2 elements per call (e.g. first a box, then its label) so the user can watch the pen write stroke by stroke.",
     "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
@@ -123,6 +128,9 @@ const en: Dict = {
   "tool.removeNeedId": "remove requires elementId.",
   "tool.elNotFound": "❌ Element {id} does not exist. Use status to see current element IDs.",
   "tool.stickerUnknown": "⚠️ Unknown sticker \"{name}\", skipped (see the stickers list in the status result).",
+  "tool.overlap":
+    "❌ Draw rejected: these new elements would cover existing content: {hits}.\n" +
+    "Re-layout at the free spots ({spots}) and retry. Full containment (child inside container / background block) is not blocked; if the overlap is intentional, pass allowOverlap: true.",
   "tool.status":
     "Board \"{board}\" (dir {dir}): {count} elements.\n" +
     "Drawn: {occupied}\n" +

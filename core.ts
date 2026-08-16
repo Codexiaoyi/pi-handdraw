@@ -146,6 +146,11 @@ export const PARAMS_SCHEMA = {
     board: { type: "string", description: "目标画板名（默认当前画板；画板管理用 handdraw_board 工具）" },
     elementId: { type: "string", description: "要修改/删除的元素 ID（从上次返回的摘要或 occupied 列表获取）" },
     elements: { type: "array", items: ELEMENT_SCHEMA, description: "本次要画的元素（draw 用）或新元素（update 用）" },
+    allowOverlap: {
+      type: "boolean",
+      description:
+        "是否允许覆盖已有内容（默认 false：新元素与已占用区域部分重叠会被直接拒绝；完全包含关系如容器装子元素/底色块垫文字不受限。仅当确实需要有意的叠加效果时设 true）",
+    },
   },
   required: ["elements"],
 };
@@ -195,6 +200,8 @@ export interface CanvasActionParams {
   board?: string;
   elementId?: string;
   elements?: Array<{ type: string } & Record<string, unknown>>;
+  /** 允许覆盖已有内容（默认禁止：部分重叠会被拒绝） */
+  allowOverlap?: boolean;
 }
 
 export interface BoardActionParams {
@@ -218,6 +225,62 @@ export interface ExecuteOptions {
 
 function toElement(raw: { type: string } & Record<string, unknown>): HandDrawElement {
   return raw as unknown as HandDrawElement;
+}
+
+// ---- 覆盖保护：禁止新元素部分覆盖已有内容 ----
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 向内缩 inset 像素：容忍贴边连接（箭头连到框边缘）等轻微接触 */
+function shrinkRect(r: Rect, inset: number): Rect {
+  const w = Math.max(r.w - inset * 2, 1);
+  const h = Math.max(r.h - inset * 2, 1);
+  return { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h };
+}
+
+function rectHit(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function rectContains(outer: Rect, inner: Rect): boolean {
+  return (
+    outer.x <= inner.x &&
+    outer.y <= inner.y &&
+    outer.x + outer.w >= inner.x + inner.w &&
+    outer.y + outer.h >= inner.y + inner.h
+  );
+}
+
+/** 部分重叠=覆盖（拦截）；完全包含（容器装子元素/底色块垫文字）放行 */
+export function isCovering(a: Rect, b: Rect, inset = 6): boolean {
+  if (!rectHit(shrinkRect(a, inset), shrinkRect(b, inset))) return false;
+  if (rectContains(a, b) || rectContains(b, a)) return false;
+  return true;
+}
+
+interface OverlapItem extends Rect {
+  tag: string;
+}
+
+/** 新元素 vs 已有元素 + 同批元素之间的覆盖冲突清单 */
+function findOverlapHits(incoming: OverlapItem[], existing: OverlapItem[]): string[] {
+  const hits: string[] = [];
+  const placed: OverlapItem[] = [];
+  for (const inc of incoming) {
+    for (const ex of existing) {
+      if (isCovering(inc, ex)) hits.push(`${inc.tag} 盖上 ${ex.tag}`);
+    }
+    for (const p of placed) {
+      if (isCovering(inc, p)) hits.push(`${inc.tag} 与同批的 ${p.tag} 重叠`);
+    }
+    placed.push(inc);
+  }
+  return [...new Set(hits)];
 }
 
 /** path 元素 bbox（采样估算） */
@@ -587,6 +650,25 @@ export async function executeCanvasAction(
     }
     return true;
   });
+
+  // 覆盖保护：默认禁止新元素部分覆盖已有内容（update 排除被更新的元素自身）
+  if (!params.allowOverlap && validElements.length > 0 && (action === "draw" || action === "update")) {
+    const summary = (await canvasSummary(board)) as unknown as Summary;
+    const existing: OverlapItem[] = (summary.occupied ?? [])
+      .filter((o) => (action === "update" ? o.id !== params.elementId : true))
+      .map((o) => ({ x: o.x, y: o.y, w: o.w, h: o.h, tag: `${o.label ?? o.type}[${o.id}]` }));
+    const incoming: OverlapItem[] = validElements.map((el, i) => {
+      const info = toElementInfo(el);
+      return { x: info.x, y: info.y, w: info.w, h: info.h, tag: `${info.label ?? info.type}(新${i + 1})` };
+    });
+    const hits = findOverlapHits(incoming, existing);
+    if (hits.length > 0) {
+      return {
+        text: t("tool.overlap", { hits: hits.join("；"), spots: formatFreeSpots(summary) }),
+        details: { ok: false, collisions: hits },
+      };
+    }
+  }
 
   // 每个元素独立生成笔画并标记 elementId（可单独修改/删除）
   const buildOpts = (el: HandDrawElement): BuildOptions => ({

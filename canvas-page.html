@@ -4,27 +4,86 @@
 <meta charset="utf-8">
 <title>✏️ 实时画布</title>
 <style>
+  :root {
+    --bg: #f6f7f9;
+    --grid-dot: #dde0e7;
+    --island: rgba(255, 255, 255, 0.86);
+    --border: rgba(16, 24, 40, 0.08);
+    --ink: #171b21;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+    --accent-soft: rgba(79, 70, 229, 0.1);
+    --danger: #dc2626;
+    --shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.1);
+    --radius: 12px;
+  }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: -apple-system, "PingFang SC", sans-serif; }
-  .stage { position: relative; width: 100vw; height: 100vh; background: #fdf6e3; overflow: hidden; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 画布底色：冷调中性 + 圆点网格，无限画布的现代语言 */
+  .stage {
+    position: relative; width: 100vw; height: 100vh; overflow: hidden;
+    background: var(--bg);
+    background-image: radial-gradient(circle, var(--grid-dot) 1px, transparent 1.2px);
+    background-size: 22px 22px;
+    background-position: center;
+  }
   svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   .stroke { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-  .toast {
-    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
-    background: rgba(253,246,227,0.94); border: 1.5px solid #d5c9a8; border-radius: 999px;
-    padding: 6px 18px; font-size: 14px; color: #7d7461;
-    display: flex; gap: 14px; align-items: center; box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 10; user-select: none;
+  /* 悬浮玻璃岛：顶栏状态条与底栏工具条共用 */
+  .hud {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px;
+    background: var(--island);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    z-index: 10; user-select: none;
+    font-size: 13px; color: var(--ink);
+    transition: opacity 0.35s ease;
   }
-  .toast .label { color: #b4562c; font-weight: 600; }
-  .toast .board { color: #7d6608; font-weight: 600; }
-  .controls {
-    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
-    background: rgba(253,246,227,0.94); border: 1.5px solid #d5c9a8; border-radius: 999px;
-    padding: 6px 10px; display: flex; gap: 6px; align-items: center;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 10; user-select: none;
+  /* 作画时底栏淡出，不挡笔画；悬停随时恢复 */
+  .hud.dim { opacity: 0.25; }
+  .hud:hover { opacity: 1; }
+  .toast { top: 16px; padding: 8px 14px; }
+  .toast .label { color: var(--ink); font-weight: 500; letter-spacing: 0.01em; }
+  .toast .board {
+    background: var(--accent-soft); color: var(--accent);
+    font-weight: 600; font-size: 12px;
+    padding: 3px 8px; border-radius: 6px;
   }
-  button, select { border: 1.5px solid #c9bfa6; background: #fdf6e3; color: #6b6350; border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
-  button:hover, select:hover { background: #f3ecd9; }
+  .toast .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* WebSocket 实时状态呼吸灯 */
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; flex: none; transition: background 0.3s; }
+  .dot.on { background: #22c55e; animation: pulse 2.2s ease-in-out infinite; }
+  .dot.off { background: #ef4444; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18); }
+    50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.05); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+  .controls { bottom: 18px; padding: 6px; gap: 4px; }
+  /* 幽灵按钮：透明底，hover 才浮现 */
+  button, select {
+    border: 1px solid transparent; background: transparent; color: var(--ink);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px; font-family: inherit;
+    cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
+  }
+  button:hover, select:hover { background: rgba(16, 24, 40, 0.06); }
+  button:active { background: rgba(16, 24, 40, 0.1); }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #btnClear:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
+  select { border-color: var(--border); background: #fff; }
+  #hint {
+    color: var(--muted); font-size: 12px;
+    border-left: 1px solid var(--border);
+    padding-left: 10px; margin-left: 4px;
+  }
   /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动） */
   #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); }
 </style>
@@ -66,8 +125,8 @@
       </g>
     </g>
   </svg>
-  <div class="toast"><span class="board" id="boardName"></span><span class="label" id="curLabel">…</span><span id="progress">0</span></div>
-  <div class="controls">
+  <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
+  <div class="controls hud">
     <select id="boardSelect" onchange="switchBoard(this.value)"></select>
     <button onclick="resetView()" id="btnFit">适应</button>
     <button onclick="location.reload()" id="btnRefresh">刷新</button>
@@ -126,6 +185,8 @@ const pen = document.getElementById("pen");
 const penInner = document.getElementById("penInner");
 const labelEl = document.getElementById("curLabel");
 const progEl = document.getElementById("progress");
+const wsDot = document.getElementById("wsDot");
+const controlsEl = document.querySelector(".controls");
 let vb = { x: 0, y: 0, w: 800, h: 500 };
 function applyView() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
 function resetView() {
@@ -363,16 +424,21 @@ function renderInstant(strokes) {
   penPos = null;
 }
 
-/** 处理一批笔画（顺序播放） */
+/** 处理一批笔画（顺序播放），播放期间淡出底栏避免遮挡 */
 function handleStrokes(strokes) {
   queue = queue.then(async () => {
-    for (const s of strokes) {
-      totalStrokes++;
-      progEl.textContent = totalStrokes + tr("strokeUnit");
-      labelEl.textContent = "✏️ " + (s.label || "绘制");
-      await playStroke(s);
+    controlsEl.classList.add("dim");
+    try {
+      for (const s of strokes) {
+        totalStrokes++;
+        progEl.textContent = totalStrokes + tr("strokeUnit");
+        labelEl.textContent = "✏️ " + (s.label || "绘制");
+        await playStroke(s);
+      }
+      labelEl.textContent = tr("batchDone");
+    } finally {
+      controlsEl.classList.remove("dim");
     }
-    labelEl.textContent = tr("batchDone");
   });
 }
 
@@ -393,7 +459,7 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?board=${encodeURIComponent(board)}`);
   window.__wsState = "connecting";
-  ws.onopen = () => { window.__wsState = "open"; labelEl.textContent = tr("waiting"); };
+  ws.onopen = () => { window.__wsState = "open"; wsDot.className = "dot on"; labelEl.textContent = tr("waiting"); };
   ws.onmessage = (ev) => {
     window.__msgCount = (window.__msgCount || 0) + 1;
     try {
@@ -424,6 +490,7 @@ function connect() {
   ws.onclose = () => {
     window.__wsState = "closed";
     expectReplay = true; // 重连后服务器会再次回放全量历史
+    wsDot.className = "dot off";
     labelEl.textContent = tr("disconnected");
     setTimeout(connect, 1500);
   };

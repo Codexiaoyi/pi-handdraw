@@ -1,0 +1,726 @@
+/**
+ * core.ts — handdraw_canvas / handdraw_board 工具的 agent 无关核心
+ *
+ * 包含：
+ * - 工具参数 JSON Schema（pi 扩展和 MCP server 共用同一份定义）
+ * - 工具描述/指导语（i18n，见 i18n.ts）
+ * - 画布服务器生命周期 + 推送/查询/修改/画板管理逻辑
+ * - executeCanvasAction / executeBoardAction：工具主逻辑，返回纯文本 + 结构化 details
+ *
+ * pi 扩展（index.ts）和 MCP server（mcp-server.ts）都只是这一层的薄壳。
+ */
+import { exec } from "node:child_process";
+import { svgPathProperties } from "svg-path-properties";
+import {
+  buildStrokeSequence,
+  layoutParagraph,
+  measureText,
+  type BuildOptions,
+  type HandDrawElement,
+} from "./draw";
+import {
+  getCanvasServer,
+  isValidBoardName,
+  type BoardListItem,
+  type StrokeMsg,
+  type CanvasElementInfo,
+} from "./canvas-server";
+import { STICKERS, stickerList } from "./stickers";
+import { t, tArr, getLang, type Lang } from "./i18n";
+
+// ---------------------------------------------------------------------------
+// 参数 JSON Schema（pi 的 typebox 和 MCP 的 inputSchema 都兼容纯 JSON Schema）
+// ---------------------------------------------------------------------------
+
+const zProp = { type: "number", description: "叠放层次：小的在下面；不设则后画的在上" };
+
+const boxLike = (literal: "box" | "ellipse" | "diamond") => ({
+  type: "object",
+  properties: {
+    type: { const: literal },
+    x: { type: "number", description: "左上角 x（画布绝对坐标）" },
+    y: { type: "number", description: "左上角 y（画布绝对坐标）" },
+    w: { type: "number", description: "宽度，默认 160" },
+    h: { type: "number", description: "高度，默认 70" },
+    text: { type: "string", description: "形状内文字，默认居中" },
+    textPosition: {
+      anyOf: [{ const: "center" }, { const: "top" }],
+      description:
+        "文字位置：center=居中（默认，叶子节点用）；top=框内顶部（容器/模块框的标题用，此时框内其他内容从 y+50 以下开始排，不要覆盖标题）",
+    },
+    color: { type: "string", description: "描边颜色，如 #c0392b" },
+    fill: { type: "string", description: "填充颜色，如 #fdebd0" },
+    fillStyle: {
+      type: "string",
+      description: "填充风格：hachure(手绘斜线)/solid/zigzag/cross-hatch，默认 hachure",
+    },
+    textSize: { type: "number", description: "文字大小，默认 16" },
+    z: zProp,
+  },
+  required: ["type", "x", "y"],
+});
+
+export const ELEMENT_SCHEMA = {
+  anyOf: [
+    boxLike("box"),
+    boxLike("ellipse"),
+    boxLike("diamond"),
+    {
+      type: "object",
+      properties: {
+        type: { const: "line" },
+        x1: { type: "number" },
+        y1: { type: "number" },
+        x2: { type: "number" },
+        y2: { type: "number" },
+        color: { type: "string" },
+        z: zProp,
+      },
+      required: ["type", "x1", "y1", "x2", "y2"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "arrow" },
+        x1: { type: "number" },
+        y1: { type: "number" },
+        x2: { type: "number" },
+        y2: { type: "number" },
+        text: { type: "string", description: "箭头上的说明文字" },
+        color: { type: "string" },
+        z: zProp,
+      },
+      required: ["type", "x1", "y1", "x2", "y2"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "text" },
+        x: { type: "number", description: "单行：文字中心 x；多行（含 \\n 或设了 w）：段落左上角 x" },
+        y: { type: "number", description: "单行：文字中心 y；多行：段落左上角 y" },
+        text: { type: "string", description: "文字内容，\\n 分行" },
+        size: { type: "number", description: "字号，默认 16" },
+        color: { type: "string" },
+        w: { type: "number", description: "段落宽度：设置后开启自动换行（多行模式）" },
+        lineHeight: { type: "number", description: "行距（字号倍数，默认 1.6，仅多行）" },
+        align: { anyOf: [{ const: "left" }, { const: "center" }, { const: "right" }], description: "对齐（仅多行，默认 left）" },
+        z: zProp,
+      },
+      required: ["type", "x", "y", "text"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "sticker" },
+        name: { type: "string", description: "贴纸名（从 status 返回的 stickers 列表里选，不要编造）" },
+        x: { type: "number", description: "左上角 x" },
+        y: { type: "number", description: "左上角 y" },
+        size: { type: "number", description: "边长，默认 80" },
+        color: { type: "string", description: "整体覆盖描边色（不设用贴纸自带配色）" },
+        z: zProp,
+      },
+      required: ["type", "name", "x", "y"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "path" },
+        d: { type: "string", description: "SVG path 数据" },
+        color: { type: "string" },
+        fill: { type: "string" },
+        z: zProp,
+      },
+      required: ["type", "d"],
+    },
+  ],
+};
+
+export const PARAMS_SCHEMA = {
+  type: "object",
+  properties: {
+    action: {
+      anyOf: [{ const: "draw" }, { const: "update" }, { const: "remove" }, { const: "status" }, { const: "clear" }],
+      description:
+        "draw=画新元素（默认）；update=修改已有元素（用 elementId）；remove=删除元素；status=只查询画布状态；clear=清空整个画布（仅用户明确要求时用）",
+    },
+    board: { type: "string", description: "目标画板名（默认当前画板；画板管理用 handdraw_board 工具）" },
+    elementId: { type: "string", description: "要修改/删除的元素 ID（从上次返回的摘要或 occupied 列表获取）" },
+    elements: { type: "array", items: ELEMENT_SCHEMA, description: "本次要画的元素（draw 用）或新元素（update 用）" },
+  },
+  required: ["elements"],
+};
+
+export const BOARD_PARAMS_SCHEMA = {
+  type: "object",
+  properties: {
+    action: {
+      anyOf: [{ const: "list" }, { const: "create" }, { const: "switch" }, { const: "delete" }],
+      description: "list=列出所有画板；create=新建画板（并设为当前）；switch=切换当前画板；delete=删除画板画布数据",
+    },
+    name: { type: "string", description: "画板名（create/switch/delete 必填）；会建成 boards/<画板名>/ 目录" },
+  },
+  required: ["action"],
+};
+
+// ---------------------------------------------------------------------------
+// 工具文案（i18n）
+// ---------------------------------------------------------------------------
+
+export function toolDescription(lang: Lang = getLang()): string {
+  return t("tool.desc", undefined, lang);
+}
+export function toolGuidelines(lang: Lang = getLang()): string[] {
+  return tArr("tool.guidelines", lang);
+}
+/** MCP 用：描述 + 指导语合并（MCP 没有 promptGuidelines，全部放进 description） */
+export function toolDescriptionFull(lang: Lang = getLang()): string {
+  return t("tool.desc", undefined, lang) + "\n\n" + toolGuidelines(lang).map((g) => `- ${g}`).join("\n");
+}
+export function boardToolDescription(lang: Lang = getLang()): string {
+  return t("board.desc", undefined, lang);
+}
+export function boardToolDescriptionFull(lang: Lang = getLang()): string {
+  return t("board.desc", undefined, lang) + "\n\n" + tArr("board.guidelines", lang).map((g) => `- ${g}`).join("\n");
+}
+export function boardToolGuidelines(lang: Lang = getLang()): string[] {
+  return tArr("board.guidelines", lang);
+}
+
+// ---------------------------------------------------------------------------
+// 类型
+// ---------------------------------------------------------------------------
+
+export interface CanvasActionParams {
+  action?: "draw" | "update" | "remove" | "status" | "clear";
+  board?: string;
+  elementId?: string;
+  elements?: Array<{ type: string } & Record<string, unknown>>;
+}
+
+export interface BoardActionParams {
+  action: "list" | "create" | "switch" | "delete";
+  name?: string;
+}
+
+export interface ToolResult {
+  text: string;
+  details: Record<string, unknown>;
+}
+
+export interface ExecuteOptions {
+  /** 首次启动画布服务器时是否自动打开浏览器页面 */
+  openBrowser?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 工具辅助
+// ---------------------------------------------------------------------------
+
+function toElement(raw: { type: string } & Record<string, unknown>): HandDrawElement {
+  return raw as unknown as HandDrawElement;
+}
+
+/** path 元素 bbox（采样估算） */
+function pathBBox(d: string): { x: number; y: number; w: number; h: number } {
+  try {
+    const props = new svgPathProperties(d);
+    const len = props.getTotalLength();
+    let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    for (let i = 0; i <= 24; i++) {
+      const p = props.getPointAtLength((len * i) / 24);
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+    }
+    if (minX > maxX) throw new Error("empty");
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  } catch {
+    return { x: 0, y: 0, w: 0, h: 0 };
+  }
+}
+
+function compactMeta(meta: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** 元素 → 位置与元数据摘要（AI 判断空位、status 展示用） */
+function toElementInfo(el: HandDrawElement): CanvasElementInfo {
+  const z = el.z;
+  if (el.type === "box" || el.type === "ellipse" || el.type === "diamond") {
+    return {
+      type: el.type,
+      label: el.text,
+      x: el.x ?? 0,
+      y: el.y ?? 0,
+      w: el.w ?? 160,
+      h: el.h ?? 70,
+      z,
+      meta: compactMeta({ text: el.text, color: el.color, fill: el.fill, textSize: el.textSize, textPosition: el.textPosition }),
+    } as CanvasElementInfo;
+  }
+  if (el.type === "line" || el.type === "arrow") {
+    return {
+      type: el.type,
+      label: el.type === "arrow" ? el.text : undefined,
+      x: Math.min(el.x1, el.x2),
+      y: Math.min(el.y1, el.y2),
+      w: Math.abs(el.x2 - el.x1),
+      h: Math.abs(el.y2 - el.y1),
+      z,
+      meta: compactMeta({ text: el.text, color: el.color, from: [el.x1, el.y1], to: [el.x2, el.y2] }),
+    } as CanvasElementInfo;
+  }
+  if (el.type === "text") {
+    const size = el.size ?? 16;
+    if (el.text.includes("\n") || el.w) {
+      const layout = layoutParagraph(el.text, size, el.w, el.lineHeight ?? 1.6);
+      return {
+        type: "text",
+        label: el.text.slice(0, 24),
+        x: el.x,
+        y: el.y,
+        w: el.w ?? layout.width,
+        h: layout.height,
+        z,
+        meta: compactMeta({ text: el.text, size, color: el.color, align: el.align, lineHeight: el.lineHeight, lines: layout.lines.length }),
+      };
+    }
+    const w = measureText(el.text, size);
+    const h = size * 1.35;
+    return {
+      type: "text",
+      label: el.text.slice(0, 24),
+      x: el.x - w / 2,
+      y: el.y - h / 2,
+      w,
+      h,
+      z,
+      meta: compactMeta({ text: el.text, size, color: el.color }),
+    };
+  }
+  if (el.type === "sticker") {
+    const size = el.size ?? 80;
+    return {
+      type: "sticker",
+      label: el.name,
+      x: el.x,
+      y: el.y,
+      w: size,
+      h: size,
+      z,
+      meta: compactMeta({ name: el.name, size, color: el.color }),
+    };
+  }
+  // path
+  const bb = pathBBox(el.d);
+  return { type: "path", x: bb.x, y: bb.y, w: bb.w, h: bb.h, z, meta: compactMeta({ color: el.color, fill: el.fill }) };
+}
+
+/** 用默认浏览器打开 URL（macOS/Linux/Windows） */
+function openInBrowser(url: string) {
+  const cmd =
+    process.platform === "darwin"
+      ? `open "${url}"`
+      : process.platform === "win32"
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
+  exec(cmd, () => {
+    // 打开失败不影响主流程
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 画布服务器生命周期（local = 本进程监听；remote = 复用已有进程，走 HTTP）
+// ---------------------------------------------------------------------------
+
+let canvasServerMode: "local" | "remote" | null = null;
+
+async function ensureCanvasServer(openBrowser: boolean): Promise<string | null> {
+  const server = getCanvasServer();
+  try {
+    if (!server.isRunning()) {
+      try {
+        canvasServerMode = await server.start();
+      } catch (err) {
+        canvasServerMode = null;
+        throw err;
+      }
+      if (openBrowser) {
+        openInBrowser(`http://localhost:${server.getPort()}`);
+      }
+    } else {
+      canvasServerMode = "local";
+    }
+    return `http://localhost:${server.getPort()}`;
+  } catch {
+    canvasServerMode = null;
+    return null;
+  }
+}
+
+/** 推送笔画：本地直推或远程 HTTP */
+async function pushToCanvas(board: string, msgs: StrokeMsg[], infos: CanvasElementInfo[]): Promise<void> {
+  const server = getCanvasServer();
+  if (canvasServerMode === "remote") {
+    await fetch(`http://localhost:${server.getPort()}/api/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ board, strokes: msgs, elements: infos }),
+    });
+  } else {
+    server.pushStrokes(board, msgs, infos);
+  }
+}
+
+async function canvasSummary(board: string): Promise<Record<string, unknown>> {
+  const server = getCanvasServer();
+  if (canvasServerMode === "remote") {
+    try {
+      const res = await fetch(`http://localhost:${server.getPort()}/state?board=${encodeURIComponent(board)}`);
+      return (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* ignore */
+    }
+  }
+  return server.getSummary(board) as unknown as Record<string, unknown>;
+}
+
+/** 修改元素（update/remove）：本地直调或远程 HTTP */
+async function modifyCanvas(
+  board: string,
+  action: "update" | "remove",
+  elementId: string,
+  strokes?: StrokeMsg[],
+  info?: CanvasElementInfo
+): Promise<boolean> {
+  const server = getCanvasServer();
+  if (canvasServerMode === "remote") {
+    try {
+      const res = await fetch(`http://localhost:${server.getPort()}/api/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ board, elementId, strokes, info }),
+      });
+      const data = (await res.json()) as { ok?: boolean };
+      return data.ok !== false;
+    } catch {
+      return false;
+    }
+  }
+  return action === "update"
+    ? server.updateElement(board, elementId, strokes ?? [], info!)
+    : server.removeElement(board, elementId);
+}
+
+/** 画板列表：本地直调或远程 HTTP */
+async function boardsList(): Promise<{ active: string; boards: BoardListItem[] }> {
+  const server = getCanvasServer();
+  if (canvasServerMode === "remote") {
+    try {
+      const res = await fetch(`http://localhost:${server.getPort()}/api/boards`);
+      return (await res.json()) as { active: string; boards: BoardListItem[] };
+    } catch {
+      return { active: "default", boards: [] };
+    }
+  }
+  return { active: server.getActiveBoard(), boards: server.listBoards() };
+}
+
+/** 画板操作（create/switch/delete）：本地直调或远程 HTTP */
+async function boardOp(action: "create" | "switch" | "delete", name: string): Promise<{ ok: boolean; created?: boolean }> {
+  const server = getCanvasServer();
+  if (canvasServerMode === "remote") {
+    try {
+      const res = await fetch(`http://localhost:${server.getPort()}/api/boards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, name }),
+      });
+      const data = (await res.json()) as { ok?: boolean; created?: boolean };
+      return { ok: data.ok !== false, created: data.created };
+    } catch {
+      return { ok: false };
+    }
+  }
+  switch (action) {
+    case "create":
+      return { ok: true, created: server.createBoard(name) };
+    case "switch":
+      return { ok: server.switchBoard(name) };
+    case "delete":
+      return { ok: server.deleteBoard(name) };
+  }
+}
+
+/** 进程退出时停止本进程监听的画布服务器（remote 模式不动） */
+export function shutdownCanvasServer(): void {
+  if (canvasServerMode === "local") {
+    getCanvasServer().stop();
+  }
+  canvasServerMode = null;
+}
+
+// ---------------------------------------------------------------------------
+// handdraw_canvas 主逻辑
+// ---------------------------------------------------------------------------
+
+interface Summary {
+  board: string;
+  dir: string;
+  elementCount: number;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
+  occupied: Array<{ id: string; type: string; label?: string; x: number; y: number; w: number; h: number; z?: number }>;
+  freeSpots: Array<{ x: number; y: number; w: number; h: number; hint: string }>;
+}
+
+function formatFreeSpots(summary: Summary): string {
+  return (summary.freeSpots ?? []).map((f) => `${f.hint} @(${Math.round(f.x)},${Math.round(f.y)})`).join("; ");
+}
+
+function formatOccupied(summary: Summary): string {
+  return (summary.occupied ?? [])
+    .map((e) => `${e.label ?? e.type}[${e.id}]@(${Math.round(e.x)},${Math.round(e.y)})${e.z != null ? ` z=${e.z}` : ""}`)
+    .join("; ");
+}
+
+function formatBounds(summary: Summary): string {
+  const b = summary.bounds;
+  if (!b) return "";
+  return t("tool.bounds", {
+    minX: Math.round(b.minX),
+    maxX: Math.round(b.maxX),
+    minY: Math.round(b.minY),
+    maxY: Math.round(b.maxY),
+  });
+}
+
+export async function executeCanvasAction(
+  params: CanvasActionParams,
+  opts: ExecuteOptions = {}
+): Promise<ToolResult> {
+  const action = params.action ?? "draw";
+  const url = await ensureCanvasServer(opts.openBrowser ?? true);
+  if (!url) {
+    return { text: t("tool.serverFail"), details: { ok: false } };
+  }
+  const server = getCanvasServer();
+  const board = params.board && isValidBoardName(params.board) ? params.board : server.getActiveBoard();
+
+  if (action === "clear") {
+    if (canvasServerMode === "remote") {
+      await fetch(`http://localhost:${server.getPort()}/api/clear`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ board }),
+      });
+    } else {
+      server.clear(board);
+    }
+    return { text: t("tool.cleared"), details: { ok: true, board, elementCount: 0 } };
+  }
+
+  if (action === "status" || (action === "draw" && (params.elements ?? []).length === 0)) {
+    const summary = (await canvasSummary(board)) as unknown as Summary;
+    const lang = getLang();
+    const stickers = stickerList(lang);
+    const boards = await boardsList();
+    return {
+      text: t("tool.status", {
+        board: summary.board ?? board,
+        dir: summary.dir ?? "",
+        count: summary.elementCount,
+        occupied: formatOccupied(summary),
+        spots: formatFreeSpots(summary),
+        stickers: stickers.map((s) => `${s.name}(${s.label})`).join(", "),
+      }),
+      details: {
+        ...summary,
+        stickers,
+        boards: boards.boards.map((b) => b.name),
+        activeBoard: boards.active,
+      } as unknown as Record<string, unknown>,
+    };
+  }
+
+  const elements = (params.elements ?? []).map(toElement);
+
+  // 贴纸名校验：未知贴纸跳过并提示
+  const warnings: string[] = [];
+  const validElements = elements.filter((el) => {
+    if (el.type === "sticker" && !STICKERS[el.name]) {
+      warnings.push(t("tool.stickerUnknown", { name: el.name }));
+      return false;
+    }
+    return true;
+  });
+
+  // 每个元素独立生成笔画并标记 elementId（可单独修改/删除）
+  const buildOpts = (el: HandDrawElement): BuildOptions => ({
+    layout: "manual",
+    background: "#fdf6e3",
+    title: undefined,
+    elements: [el],
+  });
+
+  if (action === "update") {
+    if (!params.elementId || validElements.length === 0) {
+      return { text: t("tool.updateNeedId"), details: {} };
+    }
+    const el = validElements[0];
+    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+    const msgs: StrokeMsg[] = strokes.map((s) => ({
+      type: "stroke",
+      d: s.d,
+      color: s.color,
+      width: s.width,
+      dur: Math.round(s.dur * 1000),
+      fill: s.fillOnly,
+      isText: s.isText,
+      hatch: s.hatch,
+      penUp: false,
+      label: s.label,
+      elementId: params.elementId,
+    }));
+    const ok = await modifyCanvas(board, "update", params.elementId, msgs, toElementInfo(el));
+    const summary = (await canvasSummary(board)) as unknown as Summary;
+    return {
+      text: ok
+        ? t("tool.updated", {
+            id: params.elementId,
+            label: String(("text" in el && el.text) || ("name" in el && el.name) || el.type),
+            strokes: msgs.length,
+            count: summary.elementCount,
+          })
+        : t("tool.elNotFound", { id: params.elementId }),
+      details: { ok, board },
+    };
+  }
+
+  if (action === "remove") {
+    if (!params.elementId) {
+      return { text: t("tool.removeNeedId"), details: {} };
+    }
+    const ok = await modifyCanvas(board, "remove", params.elementId);
+    const summary = (await canvasSummary(board)) as unknown as Summary;
+    return {
+      text: ok
+        ? t("tool.removed", { id: params.elementId, count: summary.elementCount })
+        : t("tool.elNotFound", { id: params.elementId }),
+      details: { ok, board },
+    };
+  }
+
+  // draw：逐个元素生成笔画（带独立 id）并推送
+  const allMsgs: StrokeMsg[] = [];
+  const infos: CanvasElementInfo[] = [];
+  for (const el of validElements) {
+    const elId = `el${Math.floor(Math.random() * 1e9).toString(36)}`;
+    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+    const info = toElementInfo(el);
+    info.id = elId;
+    for (const s of strokes) {
+      allMsgs.push({
+        type: "stroke",
+        d: s.d,
+        color: s.color,
+        width: s.width,
+        dur: Math.round(s.dur * 1000),
+        fill: s.fillOnly,
+        isText: s.isText,
+        hatch: s.hatch,
+        penUp: false,
+        label: s.label,
+        elementId: elId,
+        z: info.z,
+      });
+    }
+    infos.push(info);
+  }
+  if (infos.length > 0) await pushToCanvas(board, allMsgs, infos);
+
+  const summary = (await canvasSummary(board)) as unknown as Summary;
+  return {
+    text:
+      (warnings.length ? warnings.join("\n") + "\n" : "") +
+      t("tool.drew", {
+        n: infos.length,
+        strokes: allMsgs.length,
+        board: summary.board ?? board,
+        url,
+        ids: infos.map((i) => `${i.label ?? i.type}[${i.id}]@(${Math.round(i.x)},${Math.round(i.y)})`).join("; "),
+        count: summary.elementCount,
+        bounds: formatBounds(summary),
+        spots: formatFreeSpots(summary),
+      }),
+    details: summary as unknown as Record<string, unknown>,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// handdraw_board 主逻辑
+// ---------------------------------------------------------------------------
+
+export async function executeBoardAction(
+  params: BoardActionParams,
+  opts: ExecuteOptions = {}
+): Promise<ToolResult> {
+  const url = await ensureCanvasServer(opts.openBrowser ?? false);
+  if (!url) {
+    return { text: t("tool.serverFail"), details: { ok: false } };
+  }
+  const { action, name } = params;
+
+  if (action === "list") {
+    const { active, boards } = await boardsList();
+    const text =
+      boards.length === 0
+        ? t("board.listEmpty")
+        : t("board.list", {
+            active,
+            boards: boards
+              .map((b) =>
+                t("board.item", {
+                  name: b.name,
+                  count: b.elementCount,
+                  dir: b.dir,
+                  current: b.active ? t("board.currentMark") : "",
+                })
+              )
+              .join("\n"),
+          });
+    return { text, details: { ok: true, active, boards } as unknown as Record<string, unknown> };
+  }
+
+  if (!name) {
+    return { text: t("board.needName", { action }), details: { ok: false } };
+  }
+  if (!isValidBoardName(name)) {
+    return { text: t("board.invalidName", { name }), details: { ok: false } };
+  }
+
+  if (action === "create") {
+    const r = await boardOp("create", name);
+    const { boards } = await boardsList();
+    const dir = boards.find((b) => b.name === name)?.dir ?? "";
+    return {
+      text: r.created === false ? t("board.exists", { name }) : t("board.created", { name, dir }),
+      details: { ok: r.ok, board: name, dir, created: r.created ?? true },
+    };
+  }
+
+  if (action === "switch") {
+    const r = await boardOp("switch", name);
+    if (!r.ok) return { text: t("board.notFound", { name }), details: { ok: false } };
+    const { boards } = await boardsList();
+    const count = boards.find((b) => b.name === name)?.elementCount ?? 0;
+    return { text: t("board.switched", { name, count }), details: { ok: true, board: name } };
+  }
+
+  // delete
+  const r = await boardOp("delete", name);
+  if (!r.ok) return { text: t("board.notFound", { name }), details: { ok: false } };
+  return { text: t("board.deleted", { name }), details: { ok: true, board: name } };
+}

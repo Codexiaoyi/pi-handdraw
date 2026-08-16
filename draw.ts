@@ -9,6 +9,7 @@ import rough from "roughjs";
 import type { Options } from "roughjs/bin/core";
 import { svgPathProperties } from "svg-path-properties";
 import { charStrokeParts, charDrawInfo } from "./handwriting";
+import { STICKERS } from "./stickers";
 
 const gen = rough.generator();
 
@@ -35,6 +36,8 @@ export interface BoxLikeElement {
   /** 填充风格：hachure(手绘斜线) | solid | zigzag | cross-hatch */
   fillStyle?: string;
   textSize?: number;
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
 }
 
 export interface LineLikeElement {
@@ -46,6 +49,8 @@ export interface LineLikeElement {
   /** 连线标签（箭头中点的说明文字） */
   text?: string;
   color?: string;
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
 }
 
 export interface TextElement {
@@ -55,6 +60,29 @@ export interface TextElement {
   text: string;
   size?: number;
   color?: string;
+  /** 段落宽度：设置后开启自动换行（此时 x,y 为段落左上角）；不设且文本无 \n 时为单行（x,y 为文字中心，旧行为） */
+  w?: number;
+  /** 行距（字号倍数，默认 1.6，仅多行有效） */
+  lineHeight?: number;
+  /** 对齐（仅多行有效，默认 left） */
+  align?: "left" | "center" | "right";
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
+}
+
+export interface StickerElement {
+  type: "sticker";
+  /** 贴纸名（见 stickers.ts，status 返回清单） */
+  name: string;
+  /** 左上角 */
+  x: number;
+  y: number;
+  /** 边长（默认 80） */
+  size?: number;
+  /** 整体覆盖描边色（不设用贴纸自带配色） */
+  color?: string;
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
 }
 
 export interface PathElement {
@@ -63,9 +91,11 @@ export interface PathElement {
   d: string;
   color?: string;
   fill?: string;
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
 }
 
-export type HandDrawElement = BoxLikeElement | LineLikeElement | TextElement | PathElement;
+export type HandDrawElement = BoxLikeElement | LineLikeElement | TextElement | StickerElement | PathElement;
 
 export interface BuildOptions {
   title?: string;
@@ -524,6 +554,48 @@ function segmentText(text: string, size: number): TextSegment[] {
   return segments;
 }
 
+/** 单行文字宽度估算（与 layoutSegments 一致的分段宽度模型） */
+export function measureText(text: string, size: number): number {
+  const segs = segmentText(text, size);
+  const gap = size * 0.15;
+  return segs.reduce((s, seg) => s + seg.width, 0) + gap * Math.max(0, segs.length - 1);
+}
+
+export interface ParagraphLayout {
+  lines: string[];
+  /** 最宽行宽度 */
+  width: number;
+  /** 总高 = 行数 × 行距 */
+  height: number;
+  lineHeightPx: number;
+}
+
+/** 段落排版：\n 分行 + 可选自动换行（拉丁按词、其余按字，贪心装行） */
+export function layoutParagraph(text: string, size: number, maxW?: number, lineHeightMul = 1.6): ParagraphLayout {
+  const lineHeightPx = size * lineHeightMul;
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    if (!maxW || measureText(para, size) <= maxW) {
+      out.push(para);
+      continue;
+    }
+    const tokens = para.match(/[A-Za-z0-9''_-]+\s*|\S|\s+/g) ?? [para];
+    let line = "";
+    for (const tok of tokens) {
+      if (line !== "" && measureText(line + tok, size) > maxW) {
+        out.push(line.trimEnd());
+        line = tok.trimStart();
+      } else {
+        line += tok;
+      }
+    }
+    if (line !== "") out.push(line.trimEnd());
+  }
+  const lines = out.length ? out : [""];
+  const width = Math.max(...lines.map((l) => measureText(l, size)), 1);
+  return { lines, width, height: lines.length * lineHeightPx, lineHeightPx };
+}
+
 /** 分段布局：总宽居中，返回每段的中心 x */
 function layoutSegments(text: string, cx: number, size: number): Array<TextSegment & { cx: number }> {
   const segs = segmentText(text, size);
@@ -711,8 +783,10 @@ function elementParts(el: HandDrawElement, t: SpeedTiming, elIndex: number): Ani
     return parts;
   }
 
+  if (el.type === "sticker") return []; // 贴纸仅实时画布（buildStrokeSequence）支持
+
   if (el.type === "text") {
-    return textParts(el.text, el.x, el.y, el.size ?? 16, el.color ?? "#263238", t.strokeFrames, t.strokeInterval);
+    return textParts(el.text.replace(/\n/g, " "), el.x, el.y, el.size ?? 16, el.color ?? "#263238", t.strokeFrames, t.strokeInterval);
   }
 
   // path：整条生长
@@ -1107,6 +1181,25 @@ function htmlTextStrokes(text: string, cx: number, cy: number, size: number, col
   return strokes;
 }
 
+/** 段落文字 → 笔画记录：逐行自上而下（x,y 为段落左上角），行内对齐 */
+function htmlParagraphStrokes(el: TextElement, size: number, color: string, t: SpeedTiming): HtmlStroke[] {
+  const layout = layoutParagraph(el.text, size, el.w, el.lineHeight ?? 1.6);
+  const align = el.align ?? "left";
+  const boxW = el.w ?? layout.width;
+  const strokes: HtmlStroke[] = [];
+  layout.lines.forEach((line, i) => {
+    if (line.trim() === "") return; // 空行只占行高
+    const lineW = measureText(line, size);
+    const cy = el.y + layout.lineHeightPx * (i + 0.5);
+    let cx: number;
+    if (align === "center") cx = el.x + boxW / 2;
+    else if (align === "right") cx = el.x + boxW - lineW / 2;
+    else cx = el.x + lineW / 2;
+    strokes.push(...htmlTextStrokes(line, cx, cy, size, color, t));
+  });
+  return strokes;
+}
+
 /** rough 填充斜线：合并成一笔（整体快速生长；逐根线画太拖节奏） */
 function htmlFillStrokes(drawable: unknown, fillColor: string, t: SpeedTiming): HtmlStroke[] {
   const d = drawable as { sets?: Array<{ type: string; ops: Array<{ op: string; data: number[] }> }> };
@@ -1237,7 +1330,30 @@ export function buildStrokeSequence(
         strokes.push(...htmlTextStrokes(el.text, (el.x1 + el.x2) / 2, (el.y1 + el.y2) / 2 - 8, 13, color, t));
       }
     } else if (el.type === "text") {
-      strokes.push(...htmlTextStrokes(el.text, el.x, el.y, el.size ?? 16, el.color ?? "#263238", t));
+      const size = el.size ?? 16;
+      const color = el.color ?? "#263238";
+      if (el.text.includes("\n") || el.w) {
+        strokes.push(...htmlParagraphStrokes(el, size, color, t));
+      } else {
+        strokes.push(...htmlTextStrokes(el.text, el.x, el.y, size, color, t));
+      }
+    } else if (el.type === "sticker") {
+      const st = STICKERS[el.name];
+      if (!st) continue; // core 已校验并提示未知贴纸，这里兜底跳过
+      const size = el.size ?? 80;
+      const k = size / 100;
+      st.strokes.forEach((ss, si) => {
+        const pts = ss.points.map(([px, py]) => [el.x + px * k, el.y + py * k] as [number, number]);
+        const color = el.color ?? ss.color ?? "#37474f";
+        const opt = roughOptions(color, ss.fill, ss.fill ? "solid" : undefined, sd + si * 7);
+        const drawn = ss.closed ? gen.polygon(pts, opt) : ss.smooth === false ? gen.linearPath(pts, opt) : gen.curve(pts, opt);
+        const sets = (drawn as { sets?: Array<{ type: string }> }).sets ?? [];
+        const strokeSet = sets.find((s2) => s2.type === "path") ?? sets[0];
+        if (strokeSet) {
+          push({ d: gen.opsToPath(strokeSet as never), color, width: 2, dur: (t.edgeFrames * t.edgeInterval) / 1000, label: `贴纸 ${el.name}` });
+        }
+        if (ss.fill) strokes.push(...htmlFillStrokes(drawn, ss.fill, t));
+      });
     } else {
       const drawn = gen.path(el.d, roughOptions(el.color, el.fill, "hachure", sd));
       push({ d: gen.opsToPath((drawn.sets?.[0] ?? drawn) as never), color: el.color ?? "#37474f", width: 2, dur: (t.edgeFrames * t.edgeInterval) / 1000, label: "画路径" });

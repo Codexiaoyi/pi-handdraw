@@ -1,23 +1,34 @@
 /**
- * canvas-server.ts — 实时画布服务器
+ * canvas-server.ts — 实时画布服务器（多画板）
  *
  * 本地 HTTP + WebSocket 服务器：
- * - GET /  : 提供无限画布页面（增量渲染 + 笔尖跟随动画）
- * - WS /ws : 推送"新笔画"事件，浏览器实时播放
- * - 维护画布状态（已画元素），供 AI 判断下一笔画在哪
+ * - GET /            : 无限画布页面（增量渲染 + 笔尖跟随动画），?board=<名> 指定画板
+ * - WS /ws?board=<名>: 推送"新笔画"事件，浏览器实时播放（按画板隔离）
+ * - /state、/api/*   : 画板状态与绘制 API（供 remote 模式的其他进程复用）
+ * - /api/boards      : 画板管理（list/create/switch/delete）
+ *
+ * 画板 = boards/<画板名>/ 目录：
+ * - state.json  画布状态（元素 + 笔画回放缓存，重启自动恢复）
+ * - images/     图片等资源（预留给后续画布引用）
  */
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pageStrings, getLang } from "./i18n";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-/** 画布状态持久化文件（重启自动恢复） */
-const STATE_FILE = join(__dirname, "canvas-state.json");
+/** 画板根目录（可用 HANDDRAW_BOARDS_DIR 覆盖） */
+export const BOARDS_DIR = process.env.HANDDRAW_BOARDS_DIR ?? join(__dirname, "boards");
+/** 旧版单画布状态文件（启动时自动迁移为 default 画板） */
+const LEGACY_STATE_FILE = join(__dirname, "canvas-state.json");
+const ACTIVE_FILE = join(BOARDS_DIR, ".active-board");
+export const DEFAULT_BOARD = "default";
 
-/** 候选端口（8787 可能被其他项目占用） */
-export const CANVAS_PORTS = [8788, 8789, 8790, 8791];
+/** 候选端口（8787 可能被其他项目占用；可用 HANDDRAW_CANVAS_PORTS=端口1,端口2 覆盖） */
+export const CANVAS_PORTS =
+  process.env.HANDDRAW_CANVAS_PORTS?.split(",").map(Number).filter((n) => n > 0) ?? [8788, 8789, 8790, 8791];
 export const CANVAS_PORT = CANVAS_PORTS[0];
 
 export interface CanvasElementInfo {
@@ -29,6 +40,10 @@ export interface CanvasElementInfo {
   y: number;
   w: number;
   h: number;
+  /** 叠放层次（小的在下面） */
+  z?: number;
+  /** 额外元数据（文字内容/颜色/字号/贴纸名等，status 展示用） */
+  meta?: Record<string, unknown>;
 }
 
 export interface StrokeMsg {
@@ -50,60 +65,210 @@ export interface StrokeMsg {
   label: string;
   /** 所属元素 ID（修改/删除用） */
   elementId?: string;
+  /** 元素叠放层次（页面按 z 分组排序渲染） */
+  z?: number;
 }
 
 export interface CanvasSummary {
+  /** 画板名 */
+  board: string;
+  /** 画板目录（资源放这里） */
+  dir: string;
   elementCount: number;
   /** 已画内容总范围 */
   bounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
-  /** 每个已画元素的位置（AI 判断空位用） */
+  /** 每个已画元素的位置与元数据（AI 判断空位用） */
   occupied: CanvasElementInfo[];
   /** 推荐空位（内容右侧/下方） */
   freeSpots: Array<{ x: number; y: number; w: number; h: number; hint: string }>;
 }
 
+export interface BoardListItem {
+  name: string;
+  elementCount: number;
+  dir: string;
+  active: boolean;
+}
+
+interface BoardState {
+  name: string;
+  elements: CanvasElementInfo[];
+  replayCache: StrokeMsg[];
+  nextElId: number;
+  nextZ: number;
+}
+
+/** 画板名合法性：目录名安全（不含路径分隔符/..，不做隐藏文件） */
+export function isValidBoardName(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= 60 &&
+    !/[/\\]/.test(name) &&
+    !name.includes("..") &&
+    !/^[\s.]/.test(name) &&
+    !/[\s.]$/.test(name)
+  );
+}
+
 export class CanvasServer {
   private http: Server | null = null;
   private wss: WebSocketServer | null = null;
-  private clients = new Set<WebSocket>();
+  /** 每个连接订阅的画板 */
+  private clients = new Map<WebSocket, string>();
   private pageHtml = "";
   private actualPort = 0;
 
-  /** 已画元素（摘要用） */
-  private elements: CanvasElementInfo[] = [];
-  private strokeCount = 0;
-  private nextElId = 1;
-  /** 全部已画笔画（新连接回放 + 持久化） */
-  private replayCache: StrokeMsg[] = [];
+  /** 已加载的画板状态（懒加载 + 写回磁盘） */
+  private boards = new Map<string, BoardState>();
+  private activeBoard = DEFAULT_BOARD;
 
-  /** 持久化到磁盘（进程重启自动恢复） */
-  private persist(): void {
+  // ---- 画板目录与持久化 ----
+
+  boardDir(name: string): string {
+    const dir = resolve(BOARDS_DIR, name);
+    // 防御：画板目录必须在 BOARDS_DIR 内
+    if (!dir.startsWith(resolve(BOARDS_DIR))) return resolve(BOARDS_DIR, DEFAULT_BOARD);
+    return dir;
+  }
+
+  private stateFile(name: string): string {
+    return join(this.boardDir(name), "state.json");
+  }
+
+  private persist(name: string): void {
+    const b = this.boards.get(name);
+    if (!b) return;
     try {
+      mkdirSync(this.boardDir(name), { recursive: true });
       writeFileSync(
-        STATE_FILE,
-        JSON.stringify({ elements: this.elements, replayCache: this.replayCache, nextElId: this.nextElId })
+        this.stateFile(name),
+        JSON.stringify({ elements: b.elements, replayCache: b.replayCache, nextElId: b.nextElId, nextZ: b.nextZ })
       );
     } catch {
       /* ignore */
     }
   }
 
-  /** 从磁盘恢复 */
-  private load(): void {
+  private persistActive(): void {
     try {
-      const data = JSON.parse(readFileSync(STATE_FILE, "utf8")) as {
-        elements?: CanvasElementInfo[];
-        replayCache?: StrokeMsg[];
-        nextElId?: number;
-      };
-      this.elements = data.elements ?? [];
-      this.replayCache = data.replayCache ?? [];
-      this.nextElId = data.nextElId ?? 1;
-      this.strokeCount = this.replayCache.length;
+      mkdirSync(BOARDS_DIR, { recursive: true });
+      writeFileSync(ACTIVE_FILE, this.activeBoard);
     } catch {
       /* ignore */
     }
   }
+
+  /** 取画板状态（懒加载；不存在则给空状态，首次绘制时才落盘） */
+  getBoard(name: string): BoardState {
+    let b = this.boards.get(name);
+    if (b) return b;
+    b = { name, elements: [], replayCache: [], nextElId: 1, nextZ: 1 };
+    try {
+      const data = JSON.parse(readFileSync(this.stateFile(name), "utf8")) as Partial<BoardState>;
+      b.elements = data.elements ?? [];
+      b.replayCache = data.replayCache ?? [];
+      b.nextElId = data.nextElId ?? 1;
+      b.nextZ = data.nextZ ?? b.elements.length + 1;
+    } catch {
+      /* 新画板 */
+    }
+    this.boards.set(name, b);
+    return b;
+  }
+
+  boardExists(name: string): boolean {
+    return this.boards.has(name) || existsSync(this.stateFile(name));
+  }
+
+  getActiveBoard(): string {
+    return this.activeBoard;
+  }
+
+  listBoards(): BoardListItem[] {
+    const names = new Set<string>(this.boards.keys());
+    try {
+      for (const e of readdirSync(BOARDS_DIR, { withFileTypes: true })) {
+        if (e.isDirectory() && isValidBoardName(e.name)) names.add(e.name);
+      }
+    } catch {
+      /* boards 目录还没建 */
+    }
+    if (names.size === 0) names.add(DEFAULT_BOARD);
+    return [...names].sort().map((name) => ({
+      name,
+      elementCount: this.getBoard(name).elements.length,
+      dir: this.boardDir(name),
+      active: name === this.activeBoard,
+    }));
+  }
+
+  /** 创建画板（目录 + images/ 子目录）；返回 false = 已存在 */
+  createBoard(name: string): boolean {
+    const existed = this.boardExists(name);
+    mkdirSync(join(this.boardDir(name), "images"), { recursive: true });
+    if (!existed) {
+      this.getBoard(name); // 载入空状态
+      this.persist(name);
+    }
+    this.activeBoard = name;
+    this.persistActive();
+    return !existed;
+  }
+
+  /** 切换当前画板；false = 不存在 */
+  switchBoard(name: string): boolean {
+    if (!this.boardExists(name)) return false;
+    this.activeBoard = name;
+    this.persistActive();
+    return true;
+  }
+
+  /** 删除画板画布数据（state.json + 内存状态；目录内其他资源保留，空目录顺手删） */
+  deleteBoard(name: string): boolean {
+    if (!this.boardExists(name)) return false;
+    this.boards.delete(name);
+    try {
+      rmSync(this.stateFile(name), { force: true });
+      // 目录空了就删掉；有 images/ 等资源则保留
+      const dir = this.boardDir(name);
+      const left = readdirSync(dir);
+      const onlyEmptyImages = left.length === 1 && left[0] === "images" && readdirSync(join(dir, "images")).length === 0;
+      if (left.length === 0 || onlyEmptyImages) rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    if (this.activeBoard === name) {
+      this.activeBoard = DEFAULT_BOARD;
+      this.persistActive();
+    }
+    // 通知订阅该画板的客户端清屏
+    this.broadcast(name, JSON.stringify({ type: "clear" }));
+    return true;
+  }
+
+  /** 旧版单画布状态迁移为 default 画板 */
+  private migrateLegacyState(): void {
+    try {
+      if (existsSync(LEGACY_STATE_FILE) && !existsSync(this.stateFile(DEFAULT_BOARD))) {
+        mkdirSync(this.boardDir(DEFAULT_BOARD), { recursive: true });
+        renameSync(LEGACY_STATE_FILE, this.stateFile(DEFAULT_BOARD));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private loadActive(): void {
+    try {
+      const name = readFileSync(ACTIVE_FILE, "utf8").trim();
+      if (name && isValidBoardName(name) && this.boardExists(name)) this.activeBoard = name;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // ---- 服务器生命周期 ----
 
   getPort(): number {
     return this.actualPort || CANVAS_PORT;
@@ -128,18 +293,19 @@ export class CanvasServer {
   /**
    * 启动：依次尝试候选端口。
    * - 空闲端口 → 本进程监听（local）
-   * - 端口被占用且是画布服务器 → 复用（remote，由 index.ts 处理推送）
+   * - 端口被占用且是画布服务器 → 复用（remote，由 core.ts 走 HTTP 推送）
    * - 端口被占用但不是画布服务器 → 尝试下一个端口
    */
   async start(): Promise<"local" | "remote"> {
     if (this.http) return "local";
-    // 加载画布页面
+    // 加载画布页面（直接读取，i18n 已硬编码在 HTML 里）
     try {
       this.pageHtml = readFileSync(join(__dirname, "canvas-page.html"), "utf8");
     } catch {
       this.pageHtml = "<html><body>canvas page missing</body></html>";
     }
-    this.load(); // 恢复上次画布内容
+    this.migrateLegacyState();
+    this.loadActive();
     for (const port of CANVAS_PORTS) {
       const ok = await this.tryListen(port);
       if (ok === "local") {
@@ -154,64 +320,121 @@ export class CanvasServer {
     throw new Error("NO_PORT_AVAILABLE");
   }
 
+  /** 从 query/body 里取画板名（默认当前画板） */
+  private boardOf(url: URL, body?: { board?: string }): string {
+    const name = body?.board ?? url.searchParams.get("board") ?? undefined;
+    return name && isValidBoardName(name) ? name : this.activeBoard;
+  }
+
+  private readBody(req: import("node:http").IncomingMessage): Promise<Record<string, unknown>> {
+    return new Promise((resolveBody, rejectBody) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        try {
+          resolveBody(JSON.parse(body || "{}") as Record<string, unknown>);
+        } catch {
+          rejectBody(new Error("bad json"));
+        }
+      });
+      req.on("error", rejectBody);
+    });
+  }
+
   private tryListen(port: number): Promise<"local" | "remote" | "skip"> {
-    return new Promise((resolve) => {
+    return new Promise((resolveListen) => {
       const http = createServer((req, res) => {
-        if (req.url === "/" || req.url === "/index.html") {
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(this.pageHtml);
-          return;
-        }
-        if (req.url === "/state") {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(this.getSummary()));
-          return;
-        }
-        if (req.method === "POST" && req.url === "/api/push") {
-          // 远程推送（其他进程复用本服务器）
-          let body = "";
-          req.on("data", (c) => (body += c));
-          req.on("end", () => {
+        void (async () => {
+          const url = new URL(req.url ?? "/", "http://localhost");
+          if (url.pathname === "/" || url.pathname === "/index.html") {
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            res.end(this.pageHtml);
+            return;
+          }
+          if (url.pathname === "/state") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(this.getSummary(this.boardOf(url))));
+            return;
+          }
+          if (url.pathname === "/api/boards" && req.method === "GET") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ active: this.activeBoard, boards: this.listBoards() }));
+            return;
+          }
+          if (url.pathname === "/api/boards" && req.method === "POST") {
             try {
-              const { strokes, elements } = JSON.parse(body) as { strokes: StrokeMsg[]; elements: CanvasElementInfo[] };
-              this.pushStrokes(strokes ?? [], elements ?? []);
+              const body = (await this.readBody(req)) as { action?: string; name?: string };
+              const name = body.name ?? "";
+              if (!isValidBoardName(name)) throw new Error("bad name");
+              let out: Record<string, unknown>;
+              switch (body.action) {
+                case "create":
+                  out = { ok: true, created: this.createBoard(name) };
+                  break;
+                case "switch":
+                  out = { ok: this.switchBoard(name) };
+                  break;
+                case "delete":
+                  out = { ok: this.deleteBoard(name) };
+                  break;
+                default:
+                  throw new Error("bad action");
+              }
               res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify(this.getSummary()));
+              res.end(JSON.stringify({ ...out, active: this.activeBoard, boards: this.listBoards() }));
             } catch {
               res.writeHead(400);
               res.end();
             }
-          });
-          return;
-        }
-        if (req.method === "POST" && req.url === "/api/clear") {
-          this.clear();
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, ...this.getSummary() }));
-          return;
-        }
-        if (req.method === "POST" && (req.url === "/api/update" || req.url === "/api/remove")) {
-          let body = "";
-          req.on("data", (c) => (body += c));
-          req.on("end", () => {
+            return;
+          }
+          if (req.method === "POST" && url.pathname === "/api/push") {
+            // 远程推送（其他进程复用本服务器）
             try {
-              const data = JSON.parse(body) as { elementId: string; strokes?: StrokeMsg[]; info?: CanvasElementInfo };
-              if (!data.elementId) throw new Error("no id");
+              const body = (await this.readBody(req)) as { board?: string; strokes: StrokeMsg[]; elements: CanvasElementInfo[] };
+              const board = this.boardOf(url, body);
+              this.pushStrokes(board, body.strokes ?? [], body.elements ?? []);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(this.getSummary(board)));
+            } catch {
+              res.writeHead(400);
+              res.end();
+            }
+            return;
+          }
+          if (req.method === "POST" && url.pathname === "/api/clear") {
+            const body = await this.readBody(req).catch(() => ({}));
+            const board = this.boardOf(url, body);
+            this.clear(board);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, ...this.getSummary(board) }));
+            return;
+          }
+          if (req.method === "POST" && (url.pathname === "/api/update" || url.pathname === "/api/remove")) {
+            try {
+              const body = (await this.readBody(req)) as {
+                board?: string;
+                elementId: string;
+                strokes?: StrokeMsg[];
+                info?: CanvasElementInfo;
+              };
+              if (!body.elementId) throw new Error("no id");
+              const board = this.boardOf(url, body);
               const ok =
-                req.url === "/api/update"
-                  ? this.updateElement(data.elementId, data.strokes ?? [], data.info as CanvasElementInfo)
-                  : this.removeElement(data.elementId);
+                url.pathname === "/api/update"
+                  ? this.updateElement(board, body.elementId, body.strokes ?? [], body.info as CanvasElementInfo)
+                  : this.removeElement(board, body.elementId);
               res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok, ...this.getSummary() }));
+              res.end(JSON.stringify({ ok, ...this.getSummary(board) }));
             } catch {
               res.writeHead(400);
               res.end();
             }
-          });
-          return;
-        }
-        res.writeHead(404);
-        res.end();
+            return;
+          }
+          res.writeHead(404);
+          res.end();
+        })();
       });
 
       this.wss = new WebSocketServer({ server: http, path: "/ws" });
@@ -219,13 +442,16 @@ export class CanvasServer {
       this.wss.on("error", () => {
         /* 由 http error 处理 */
       });
-      this.wss.on("connection", (ws) => {
-        this.clients.add(ws);
+      this.wss.on("connection", (ws, req) => {
+        const url = new URL(req.url ?? "/ws", "http://localhost");
+        const board = this.boardOf(url);
+        this.clients.set(ws, board);
         ws.on("close", () => this.clients.delete(ws));
         ws.on("error", () => this.clients.delete(ws));
-        // 连接后回放当前已画内容（让新开页面也能看到全部）
-        if (this.replayCache.length > 0) {
-          ws.send(JSON.stringify({ type: "batch", strokes: this.replayCache }));
+        // 连接后回放该画板已画内容（让新开页面也能看到全部）
+        const cache = this.getBoard(board).replayCache;
+        if (cache.length > 0) {
+          ws.send(JSON.stringify({ type: "batch", strokes: cache }));
         }
       });
 
@@ -233,21 +459,21 @@ export class CanvasServer {
         if (err.code === "EADDRINUSE") {
           // 端口被占用：检查是否已有画布服务器 → 复用；否则尝试下一个端口
           CanvasServer.isCanvasServerOnPort(port).then((isMine) => {
-            resolve(isMine ? "remote" : "skip");
+            resolveListen(isMine ? "remote" : "skip");
           });
         } else {
-          resolve("skip");
+          resolveListen("skip");
         }
       });
       http.listen(port, () => {
         this.http = http;
-        resolve("local");
+        resolveListen("local");
       });
     });
   }
 
   stop(): void {
-    for (const ws of this.clients) ws.close();
+    for (const ws of this.clients.keys()) ws.close();
     this.clients.clear();
     this.wss?.close();
     this.http?.close();
@@ -255,70 +481,78 @@ export class CanvasServer {
     this.wss = null;
   }
 
+  // ---- 绘制操作（全部按画板隔离） ----
+
   /** 追加元素并推送笔画（工具每次调用） */
-  pushStrokes(strokes: StrokeMsg[], elements: CanvasElementInfo[]): void {
+  pushStrokes(board: string, strokes: StrokeMsg[], elements: CanvasElementInfo[]): void {
+    const b = this.getBoard(board);
+    const zOf = new Map<string, number>();
     for (const el of elements) {
-      if (!el.id) el.id = `el${this.nextElId++}`;
+      if (!el.id) el.id = `el${b.nextElId++}`;
+      if (el.z == null) el.z = b.nextZ++;
+      zOf.set(el.id, el.z);
     }
-    this.elements.push(...elements);
+    b.elements.push(...elements);
     for (const s of strokes) {
-      this.replayCache.push(s);
-      this.strokeCount++;
+      if (s.z == null && s.elementId) s.z = zOf.get(s.elementId);
+      b.replayCache.push(s);
     }
-    if (strokes.length === 1) {
-      this.broadcast(JSON.stringify(strokes[0]));
-    } else {
-      this.broadcast(JSON.stringify({ type: "batch", strokes }));
-    }
-    this.persist();
+    const msg = strokes.length === 1 ? JSON.stringify(strokes[0]) : JSON.stringify({ type: "batch", strokes });
+    this.broadcast(board, msg);
+    this.persist(board);
   }
 
-  /** 更新元素：删除旧笔画 + 推送新笔画 */
-  updateElement(elementId: string, strokes: StrokeMsg[], newInfo: CanvasElementInfo): boolean {
-    const idx = this.elements.findIndex((e) => e.id === elementId);
+  /** 更新元素：删除旧笔画 + 推送新笔画（z 默认沿用原值） */
+  updateElement(board: string, elementId: string, strokes: StrokeMsg[], newInfo: CanvasElementInfo): boolean {
+    const b = this.getBoard(board);
+    const idx = b.elements.findIndex((e) => e.id === elementId);
     if (idx === -1) return false;
     const info = { ...newInfo, id: elementId };
-    this.elements[idx] = info;
+    if (info.z == null) info.z = b.elements[idx].z ?? b.nextZ++;
+    b.elements[idx] = info;
     // 从回放缓存移除旧笔画
-    this.replayCache = this.replayCache.filter((s) => s.elementId !== elementId);
+    b.replayCache = b.replayCache.filter((s) => s.elementId !== elementId);
     for (const s of strokes) {
       s.elementId = elementId;
-      this.replayCache.push(s);
-      this.strokeCount++;
+      if (s.z == null) s.z = info.z;
+      b.replayCache.push(s);
     }
-    this.broadcast(JSON.stringify({ type: "update", elementId, strokes }));
-    this.persist();
+    this.broadcast(board, JSON.stringify({ type: "update", elementId, z: info.z, strokes }));
+    this.persist(board);
     return true;
   }
 
   /** 删除元素 */
-  removeElement(elementId: string): boolean {
-    const before = this.elements.length;
-    this.elements = this.elements.filter((e) => e.id !== elementId);
-    this.replayCache = this.replayCache.filter((s) => s.elementId !== elementId);
-    if (this.elements.length === before) return false;
-    this.broadcast(JSON.stringify({ type: "remove", elementId }));
-    this.persist();
+  removeElement(board: string, elementId: string): boolean {
+    const b = this.getBoard(board);
+    const before = b.elements.length;
+    b.elements = b.elements.filter((e) => e.id !== elementId);
+    b.replayCache = b.replayCache.filter((s) => s.elementId !== elementId);
+    if (b.elements.length === before) return false;
+    this.broadcast(board, JSON.stringify({ type: "remove", elementId }));
+    this.persist(board);
     return true;
   }
 
-  clear(): void {
-    this.elements = [];
-    this.replayCache = [];
-    this.strokeCount = 0;
-    this.broadcast(JSON.stringify({ type: "clear" }));
-    this.persist();
+  clear(board: string): void {
+    const b = this.getBoard(board);
+    b.elements = [];
+    b.replayCache = [];
+    b.nextZ = 1;
+    this.broadcast(board, JSON.stringify({ type: "clear" }));
+    this.persist(board);
   }
 
-  private broadcast(msg: string): void {
-    for (const ws of this.clients) {
-      if (ws.readyState === ws.OPEN) ws.send(msg);
+  private broadcast(board: string, msg: string): void {
+    for (const [ws, b] of this.clients) {
+      if (b === board && ws.readyState === ws.OPEN) ws.send(msg);
     }
   }
 
-  getSummary(): CanvasSummary {
+  getSummary(board: string): CanvasSummary {
+    const b = this.getBoard(board);
     let bounds: CanvasSummary["bounds"] = null;
-    for (const el of this.elements) {
+    for (const el of b.elements) {
       const x1 = el.x;
       const y1 = el.y;
       const x2 = el.x + el.w;
@@ -360,9 +594,11 @@ export class CanvasServer {
       freeSpots.push({ x: 60, y: 80, w: 400, h: 120, hint: "画布左上角（起点）" });
     }
     return {
-      elementCount: this.elements.length,
+      board,
+      dir: this.boardDir(board),
+      elementCount: b.elements.length,
       bounds,
-      occupied: this.elements,
+      occupied: b.elements,
       freeSpots,
     };
   }

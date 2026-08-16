@@ -3,3 +3,4 @@ canvas-state.json
 .test-*.ts
 .DS_Store
 handdraw/
+boards/

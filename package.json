@@ -8,9 +8,19 @@
     "url": "https://github.com/Codexiaoyi/pi-handdraw.git"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "hanzi-writer-data": "^2.0.1",
     "roughjs": "^4.6.6",
     "svg-path-properties": "^2.0.2",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12"
+  },
+  "bin": {
+    "handdraw-mcp": "./mcp-server.ts"
+  },
+  "scripts": {
+    "mcp": "tsx mcp-server.ts"
   }
 }

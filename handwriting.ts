@@ -6,6 +6,11 @@
  * 每个笔画用 stroke-dasharray 生长动画，从起笔写到收笔。
  */
 import { svgPathProperties } from "svg-path-properties";
+import { createRequire } from "node:module";
+
+// hanzi-writer-data 按字加载：require('hanzi-writer-data/登')
+// pi 扩展环境（jiti/CJS）有全局 require；MCP/ESM 环境用 createRequire
+const localRequire = typeof require !== "undefined" ? require : createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // 数据加载与缓存
@@ -24,7 +29,7 @@ export function getCharData(char: string): CharData | null {
   if (charDataCache.has(char)) return charDataCache.get(char) ?? null;
   try {
     // hanzi-writer-data 按字加载：require('hanzi-writer-data/登')
-    const d = (require(`hanzi-writer-data/${char}`) as CharData) ?? null;
+    const d = (localRequire(`hanzi-writer-data/${char}`) as CharData) ?? null;
     charDataCache.set(char, d);
     return d;
   } catch {

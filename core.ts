@@ -348,7 +348,7 @@ async function ensureCanvasServer(openBrowser: boolean): Promise<string | null> 
         canvasServerMode = null;
         throw err;
       }
-      if (openBrowser) {
+      if (openBrowser && canvasServerMode === "local") {
         openInBrowser(`http://localhost:${server.getPort()}`);
       }
     } else {

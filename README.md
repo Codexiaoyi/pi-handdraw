@@ -58,16 +58,19 @@ The same tool is available over MCP (stdio), sharing all logic with the pi exten
 
 Or run it directly: `npm run mcp`.
 
-### As a standalone web agent (chat in the canvas page)
+### As a standalone web canvas bridged to your own agent (ACP)
 
-Run a self-contained server with a built-in chat agent — the canvas page gets a slide-in chat panel on the left where you talk to the agent directly and watch it draw:
+Run a self-contained canvas server with a chat panel — the page gets a slide-in chat card on the left where you talk to **your own installed agent CLI**, which draws on the canvas through the handdraw MCP server. The bridge speaks [ACP](https://agentclientprotocol.com) (Agent Client Protocol, the same protocol Zed uses), so no built-in LLM and no API keys to configure — it uses your agent's existing login:
 
 ```bash
-HANDDRAW_LLM_API_KEY=sk-... npm run agent
+npm run agent                              # auto-detects: claude → codex → gemini
+HANDDRAW_AGENT_BACKEND=codex npm run agent # pick a backend explicitly
+HANDDRAW_ACP_CMD="my-acp-agent --flag" npm run agent  # any ACP agent command
 ```
 
-- Any OpenAI-compatible `/chat/completions` endpoint works: `HANDDRAW_LLM_BASE_URL` (default `https://api.openai.com/v1`), `HANDDRAW_LLM_MODEL` (default `gpt-4o-mini`)
+- Backends: `claude-code` / `codex` (via `@zed-industries/*-acp` adapters, fetched by npx) and `gemini` (built-in `--experimental-acp`)
 - The chat panel (floating card, collapsible) only appears in this mode; the bottom bar also has a **＋** button to create new boards
+- Tool permission requests from the agent are auto-approved (`HANDDRAW_ACP_AUTO_APPROVE=0` to reject instead); messages time out after 10 min (`HANDDRAW_AGENT_TIMEOUT_MS`)
 - Chat API: `GET /api/agent/info`, `GET /api/chat/history`, `POST /api/chat`, `POST /api/chat/reset`
 
 ## Usage
@@ -91,7 +94,7 @@ Once installed, you don't call anything directly — just ask:
 |---|---|
 | `index.ts` | pi extension shell: registers the `handdraw_canvas` tool |
 | `mcp-server.ts` | MCP server shell (stdio): same tool for any MCP-capable agent |
-| `web-agent.ts` | Standalone web agent: canvas server + chat panel + LLM tool-calling loop |
+| `web-agent.ts` | Standalone web canvas + chat bridge: ACP client that relays the in-page chat to your own agent CLI (claude code / codex / gemini) |
 | `core.ts` | Agent-agnostic core: shared JSON schema, tool guidelines, canvas server lifecycle, draw/update/remove/status/clear logic |
 | `draw.ts` | Drawing language → rough.js strokes; stroke sequencing for the pen animation |
 | `handwriting.ts` | Stroke-by-stroke handwriting data (Chinese glyph data from `hanzi-writer-data`) |

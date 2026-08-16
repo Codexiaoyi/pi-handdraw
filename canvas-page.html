@@ -31,7 +31,7 @@
     background-size: 22px 22px;
     background-position: center;
   }
-  svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  #canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   .stroke { fill: none; stroke-linecap: round; stroke-linejoin: round; }
   /* 悬浮玻璃岛：顶栏状态条与底栏工具条共用 */
   .hud {
@@ -115,6 +115,9 @@
     box-shadow: var(--shadow); font-size: 18px; z-index: 11;
   }
   .chat-launcher:hover { background: #fff; }
+  .chat-launcher svg { width: 20px; height: 20px; }
+  .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .chat-title svg { width: 15px; height: 15px; color: var(--accent); }
   .chat-panel {
     position: fixed; left: 16px; top: 72px; bottom: 86px;
     width: 340px; max-width: calc(100vw - 80px);
@@ -132,7 +135,7 @@
     display: flex; align-items: center; gap: 8px;
     padding: 12px 12px 10px; border-bottom: 1px solid var(--border);
   }
-  .chat-title { font-weight: 600; font-size: 13px; color: var(--ink); }
+  .chat-title { font-weight: 600; font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 6px; }
   .chat-model {
     margin-left: auto; font-size: 11px; color: var(--muted);
     background: rgba(16, 24, 40, 0.05); padding: 2px 8px; border-radius: 6px;
@@ -164,6 +167,21 @@
   .chat-input button { background: var(--accent); color: #fff; border-radius: 10px; padding: 0 14px; }
   .chat-input button:hover { background: #4338ca; }
   .chat-input button:disabled { opacity: 0.5; cursor: default; }
+  /* ---------- 元素选中：蚂蚁线高亮框 + 操作条 ---------- */
+  .sel-rect {
+    fill: rgba(79, 70, 229, 0.07); stroke: var(--accent);
+    stroke-width: 1.5; stroke-dasharray: 6 4;
+    animation: march 0.8s linear infinite;
+  }
+  @keyframes march { to { stroke-dashoffset: -10; } }
+  @media (prefers-reduced-motion: reduce) { .sel-rect { animation: none; } }
+  .sel-chip { top: 16px; left: 16px; transform: none; padding: 6px 8px 6px 12px; gap: 6px; }
+  .sel-chip .sel-label {
+    font-size: 12px; color: var(--ink); max-width: 240px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sel-chip .sel-id { color: var(--muted); }
+  #selDelete:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
   /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动） */
   #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); }
 </style>
@@ -172,6 +190,7 @@
 <div class="stage">
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
     <g id="content"></g>
+    <g id="overlay" pointer-events="none"></g>
     <!--
       钢笔：笔尖在 (0,0)，笔身沿 -y 方向；JS 里 translate 到笔画点 + 固定倾角。
       结构：金色笔尖（含中缝和呼吸孔）→ 握位 → 笔杆（酒红渐变 + 高光）→ 笔顶圆珠
@@ -218,10 +237,16 @@
     <input id="nbName" placeholder="新画板名" maxlength="60">
     <button class="ok" onclick="createBoardFromPop()" id="nbOk">创建</button>
   </div>
-  <button class="chat-launcher" id="chatLauncher" hidden>💬</button>
+  <div class="sel-chip hud" id="selChip" hidden>
+    <span class="sel-label" id="selLabel"></span>
+    <button id="selQuote">引用</button>
+    <button id="selDelete">删除</button>
+    <button id="selClose">✕</button>
+  </div>
+  <button class="chat-launcher" id="chatLauncher" title="聊天" hidden><svg class="icon" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
   <div class="chat-panel closed" id="chatPanel" hidden>
     <div class="chat-head">
-      <span class="chat-title">🤖 画布小助手</span>
+      <span class="chat-title"><svg class="icon" viewBox="0 0 24 24"><path d="M15.7 21.3a1 1 0 0 1-1.4 0l-1.6-1.6a1 1 0 0 1 0-1.4l5.6-5.6a1 1 0 0 1 1.4 0l1.6 1.6a1 1 0 0 1 0 1.4z"/><path d="m18 13-1.4-6.9a1 1 0 0 0-.7-.8L3.2 2a1 1 0 0 0-1.2 1.2l3.3 12.7a1 1 0 0 0 .8.7L13 18"/><path d="m2.3 2.3 7.3 7.3"/><circle cx="11" cy="11" r="2"/></svg><span>画布小助手</span></span>
       <span class="chat-model" id="chatModel"></span>
       <button id="chatClose" title="收起">«</button>
     </div>
@@ -314,7 +339,37 @@ window.addEventListener("mousemove", (e) => {
   vb.y = drag.vy - ((e.clientY - drag.sy) * vb.h) / r.height;
   applyView();
 });
-window.addEventListener("mouseup", () => { drag = null; svg.style.cursor = ""; });
+window.addEventListener("mouseup", (e) => {
+  if (drag) {
+    // 位移小于阈值视为点击：点中元素分组 → 选中高亮；点空白 → 取消选中
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy);
+    if (moved <= 4) {
+      let g = e.target && e.target.closest ? e.target.closest("g.el") : null;
+      if (!g || !content.contains(g)) g = pickElementAt(e.clientX, e.clientY); // 空心图形内部的包围盒兜底
+      if (g) selectElement(g);
+      else if (e.target === svg || content.contains(e.target)) deselect();
+    }
+  }
+  drag = null; svg.style.cursor = "";
+});
+
+/** 兜底命中：屏幕点 → SVG 坐标，取最上层（DOM 末尾）包围盒包含该点的元素 */
+function pickElementAt(clientX, clientY) {
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+  const groups = content.querySelectorAll("g.el");
+  const pad = 6;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    try {
+      const bb = groups[i].getBBox();
+      if (pt.x >= bb.x - pad && pt.x <= bb.x + bb.width + pad && pt.y >= bb.y - pad && pt.y <= bb.y + bb.height + pad) {
+        return groups[i];
+      }
+    } catch { /* 空分组 */ }
+  }
+  return null;
+}
 svg.addEventListener("wheel", (e) => {
   e.preventDefault();
   const r = svg.getBoundingClientRect();
@@ -554,9 +609,82 @@ function clearCanvas() {
   totalStrokes = 0;
   penPos = null;
   hidePen();
+  deselect();
   progEl.textContent = "0" + tr("strokeUnit");
   labelEl.textContent = tr("cleared");
 }
+
+// ---------- 元素点选高亮 ----------
+const overlay = document.getElementById("overlay");
+const selChip = document.getElementById("selChip");
+const selLabel = document.getElementById("selLabel");
+let selectedId = null;
+let elMetaCache = null; // /state 的 occupied 元数据（label/type），选中时懒加载，画布有变动即失效
+
+function deselect() {
+  selectedId = null;
+  overlay.innerHTML = "";
+  selChip.hidden = true;
+}
+
+async function selectElement(g) {
+  const id = g.getAttribute("data-element-id");
+  if (!id) return;
+  selectedId = id;
+  // 蚂蚁线高亮框（在 SVG 坐标系内，随缩放平移自动跟随）
+  const bb = g.getBBox();
+  const pad = 6;
+  overlay.innerHTML = "";
+  const r = svgNS("rect");
+  r.setAttribute("x", bb.x - pad);
+  r.setAttribute("y", bb.y - pad);
+  r.setAttribute("width", bb.width + pad * 2);
+  r.setAttribute("height", bb.height + pad * 2);
+  r.setAttribute("rx", "6");
+  r.setAttribute("class", "sel-rect");
+  overlay.appendChild(r);
+  // 元素 label/type（客户端只有笔画，元数据从 /state 取）
+  if (!elMetaCache) {
+    elMetaCache = {};
+    try {
+      const res = await fetch("/state?board=" + encodeURIComponent(board));
+      const data = await res.json();
+      for (const e of data.occupied ?? []) elMetaCache[e.id] = e;
+    } catch { /* ignore */ }
+  }
+  if (selectedId !== id) return; // 等待期间已改选/取消
+  const meta = elMetaCache[id];
+  selLabel.textContent = (meta?.label || meta?.type || "元素") + " ";
+  const idSpan = document.createElement("span");
+  idSpan.className = "sel-id";
+  idSpan.textContent = id;
+  selLabel.appendChild(idSpan);
+  selChip.hidden = false;
+}
+
+document.getElementById("selClose").addEventListener("click", deselect);
+document.getElementById("selDelete").addEventListener("click", async () => {
+  if (!selectedId) return;
+  try {
+    await fetch("/api/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ board, elementId: selectedId }),
+    });
+  } catch { /* ignore */ }
+});
+document.getElementById("selQuote").addEventListener("click", () => {
+  if (!selectedId) return;
+  // agent 模式：把选中元素 ID 带进聊天输入框；否则复制到剪贴板
+  if (!chatLauncher.hidden || !chatPanel.hidden) {
+    openChat();
+    chatText.value = `元素 ${selectedId}：`;
+    autoGrow();
+    chatText.focus();
+  } else {
+    navigator.clipboard?.writeText(selectedId);
+  }
+});
 
 // ---------- WebSocket 实时接收 ----------
 let ws = null;
@@ -571,16 +699,19 @@ function connect() {
     window.__msgCount = (window.__msgCount || 0) + 1;
     try {
       const msg = JSON.parse(ev.data);
+      elMetaCache = null; // 画布有变动，元素元数据缓存失效
       if (msg.type === "clear") { expectReplay = false; clearCanvas(); return; }
       if (msg.type === "remove") {
         expectReplay = false;
         content.querySelectorAll(`g.el[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
+        if (msg.elementId === selectedId) deselect();
         labelEl.textContent = tr("removedEl", { id: msg.elementId });
         return;
       }
       if (msg.type === "update") {
         expectReplay = false;
         content.querySelectorAll(`g.el[data-element-id="${msg.elementId}"]`).forEach((el) => el.remove());
+        if (msg.elementId === selectedId) deselect();
         handleStrokes(msg.strokes.map((s) => ({ ...s, elementId: msg.elementId, z: msg.z ?? s.z })));
         return;
       }

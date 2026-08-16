@@ -58,6 +58,18 @@ The same tool is available over MCP (stdio), sharing all logic with the pi exten
 
 Or run it directly: `npm run mcp`.
 
+### As a standalone web agent (chat in the canvas page)
+
+Run a self-contained server with a built-in chat agent — the canvas page gets a slide-in chat panel on the left where you talk to the agent directly and watch it draw:
+
+```bash
+HANDDRAW_LLM_API_KEY=sk-... npm run agent
+```
+
+- Any OpenAI-compatible `/chat/completions` endpoint works: `HANDDRAW_LLM_BASE_URL` (default `https://api.openai.com/v1`), `HANDDRAW_LLM_MODEL` (default `gpt-4o-mini`)
+- The chat panel (floating card, collapsible) only appears in this mode; the bottom bar also has a **＋** button to create new boards
+- Chat API: `GET /api/agent/info`, `GET /api/chat/history`, `POST /api/chat`, `POST /api/chat/reset`
+
 ## Usage
 
 Once installed, you don't call anything directly — just ask:
@@ -79,6 +91,7 @@ Once installed, you don't call anything directly — just ask:
 |---|---|
 | `index.ts` | pi extension shell: registers the `handdraw_canvas` tool |
 | `mcp-server.ts` | MCP server shell (stdio): same tool for any MCP-capable agent |
+| `web-agent.ts` | Standalone web agent: canvas server + chat panel + LLM tool-calling loop |
 | `core.ts` | Agent-agnostic core: shared JSON schema, tool guidelines, canvas server lifecycle, draw/update/remove/status/clear logic |
 | `draw.ts` | Drawing language → rough.js strokes; stroke sequencing for the pen animation |
 | `handwriting.ts` | Stroke-by-stroke handwriting data (Chinese glyph data from `hanzi-writer-data`) |

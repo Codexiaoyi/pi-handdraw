@@ -90,6 +90,13 @@ export interface BoardListItem {
   active: boolean;
 }
 
+/** 额外路由处理器（如 web-agent 的聊天 API）：返回 true = 已处理 */
+export type CanvasExtraHandler = (
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  url: URL
+) => Promise<boolean>;
+
 interface BoardState {
   name: string;
   elements: CanvasElementInfo[];
@@ -118,6 +125,12 @@ export class CanvasServer {
   private clients = new Map<WebSocket, string>();
   private pageHtml = "";
   private actualPort = 0;
+  /** 额外路由（web-agent 模式注册聊天 API 用），在内置路由全部未命中后调用 */
+  private extraHandler: CanvasExtraHandler | null = null;
+
+  setExtraHandler(handler: CanvasExtraHandler | null): void {
+    this.extraHandler = handler;
+  }
 
   /** 已加载的画板状态（懒加载 + 写回磁盘） */
   private boards = new Map<string, BoardState>();
@@ -431,6 +444,15 @@ export class CanvasServer {
               res.end();
             }
             return;
+          }
+          if (this.extraHandler) {
+            try {
+              if (await this.extraHandler(req, res, url)) return;
+            } catch {
+              res.writeHead(500);
+              res.end();
+              return;
+            }
           }
           res.writeHead(404);
           res.end();

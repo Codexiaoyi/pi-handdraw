@@ -18,9 +18,11 @@
     "tsx": "^4.23.12"
   },
   "bin": {
-    "handdraw-mcp": "./mcp-server.ts"
+    "handdraw-mcp": "./mcp-server.ts",
+    "handdraw-agent": "./web-agent.ts"
   },
   "scripts": {
-    "mcp": "tsx mcp-server.ts"
+    "mcp": "tsx mcp-server.ts",
+    "agent": "tsx web-agent.ts"
   }
 }

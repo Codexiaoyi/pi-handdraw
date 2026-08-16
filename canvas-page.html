@@ -84,6 +84,86 @@
     border-left: 1px solid var(--border);
     padding-left: 10px; margin-left: 4px;
   }
+  [hidden] { display: none !important; }
+  /* ---------- 新建画板弹层 ---------- */
+  .nb-pop {
+    position: fixed; bottom: 72px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; padding: 8px;
+    background: var(--island);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); z-index: 12;
+  }
+  .nb-pop input {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font: inherit; font-size: 13px;
+    background: #fff; width: 170px;
+  }
+  .nb-pop input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .nb-pop .ok { background: var(--accent); color: #fff; }
+  .nb-pop .ok:hover { background: #4338ca; }
+  /* ---------- Web Agent 聊天面板（左侧悬浮卡片，可推拉） ---------- */
+  .chat-launcher {
+    position: fixed; left: 16px; top: 50%; transform: translateY(-50%);
+    width: 44px; height: 44px; border-radius: 50%; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--island);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow); font-size: 18px; z-index: 11;
+  }
+  .chat-launcher:hover { background: #fff; }
+  .chat-panel {
+    position: fixed; left: 16px; top: 72px; bottom: 86px;
+    width: 340px; max-width: calc(100vw - 80px);
+    display: flex; flex-direction: column;
+    background: var(--island);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: 0 2px 4px rgba(16, 24, 40, 0.05), 0 16px 48px rgba(16, 24, 40, 0.16);
+    z-index: 11; overflow: hidden;
+    transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .chat-panel.closed { transform: translateX(calc(-100% - 32px)); }
+  .chat-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 12px 10px; border-bottom: 1px solid var(--border);
+  }
+  .chat-title { font-weight: 600; font-size: 13px; color: var(--ink); }
+  .chat-model {
+    margin-left: auto; font-size: 11px; color: var(--muted);
+    background: rgba(16, 24, 40, 0.05); padding: 2px 8px; border-radius: 6px;
+    max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chat-head button { padding: 2px 8px; font-size: 13px; }
+  .chat-msgs {
+    flex: 1; overflow-y: auto; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .msg {
+    max-width: 85%; padding: 8px 12px; border-radius: 12px;
+    font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: rgba(16, 24, 40, 0.05); color: var(--ink); border-bottom-left-radius: 4px; }
+  .msg.thinking { display: flex; gap: 4px; align-items: center; padding: 12px 14px; }
+  .msg.thinking i { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; animation: blink 1.2s infinite; }
+  .msg.thinking i:nth-child(2) { animation-delay: 0.2s; }
+  .msg.thinking i:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+  .chat-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+  .chat-input textarea {
+    flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px; font: inherit; font-size: 13px; background: #fff;
+    min-height: 36px; max-height: 96px; line-height: 1.4;
+  }
+  .chat-input textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chat-input button { background: var(--accent); color: #fff; border-radius: 10px; padding: 0 14px; }
+  .chat-input button:hover { background: #4338ca; }
+  .chat-input button:disabled { opacity: 0.5; cursor: default; }
   /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动） */
   #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); }
 </style>
@@ -128,10 +208,28 @@
   <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
   <div class="controls hud">
     <select id="boardSelect" onchange="switchBoard(this.value)"></select>
+    <button onclick="toggleNbPop()" id="btnNewBoard" title="新建画板">＋</button>
     <button onclick="resetView()" id="btnFit">适应</button>
     <button onclick="location.reload()" id="btnRefresh">刷新</button>
     <button onclick="clearCanvas()" id="btnClear">清空</button>
-    <span style="color:#a89d85" id="hint">滚轮缩放 · 拖拽平移 · 实时连接</span>
+    <span id="hint">滚轮缩放 · 拖拽平移 · 实时连接</span>
+  </div>
+  <div class="nb-pop" id="nbPop" hidden>
+    <input id="nbName" placeholder="新画板名" maxlength="60">
+    <button class="ok" onclick="createBoardFromPop()" id="nbOk">创建</button>
+  </div>
+  <button class="chat-launcher" id="chatLauncher" hidden>💬</button>
+  <div class="chat-panel closed" id="chatPanel" hidden>
+    <div class="chat-head">
+      <span class="chat-title">🤖 画布小助手</span>
+      <span class="chat-model" id="chatModel"></span>
+      <button id="chatClose" title="收起">«</button>
+    </div>
+    <div class="chat-msgs" id="chatMsgs"></div>
+    <div class="chat-input">
+      <textarea id="chatText" rows="1" placeholder="让 AI 画点什么…"></textarea>
+      <button id="chatSend">发送</button>
+    </div>
   </div>
 </div>
 <script>
@@ -141,6 +239,10 @@ const I18N = {
   cleared: "画布已清空", restored: "已恢复画布，等待 AI 动笔…", disconnected: "连接断开，重连中…",
   removedEl: "🗑️ 已删除元素 {id}", fit: "适应", refresh: "刷新", clear: "清空",
   hint: "滚轮缩放 · 拖拽平移 · 实时连接", board: "画板",
+  newBoard: "新建画板", nbPh: "新画板名", create: "创建",
+  chatPh: "让 AI 画点什么…", send: "发送",
+  noCfg: "未配置模型 API Key：请设置 HANDDRAW_LLM_API_KEY 后重启 agent。",
+  netErr: "⚠️ 网络错误，请稍后再试",
 };
 function tr(key, vars) {
   let s = I18N[key] ?? key;
@@ -152,6 +254,11 @@ document.getElementById("btnFit").textContent = tr("fit");
 document.getElementById("btnRefresh").textContent = tr("refresh");
 document.getElementById("btnClear").textContent = tr("clear");
 document.getElementById("hint").textContent = tr("hint");
+document.getElementById("btnNewBoard").title = tr("newBoard");
+document.getElementById("nbName").placeholder = tr("nbPh");
+document.getElementById("nbOk").textContent = tr("create");
+document.getElementById("chatText").placeholder = tr("chatPh");
+document.getElementById("chatSend").textContent = tr("send");
 
 // ---------- 画板 ----------
 let board = new URLSearchParams(location.search).get("board") || "";
@@ -496,6 +603,125 @@ function connect() {
   };
   ws.onerror = () => { window.__wsState = "error"; ws.close(); };
 }
+// ---------- 新建画板 ----------
+const nbPop = document.getElementById("nbPop");
+const nbName = document.getElementById("nbName");
+function toggleNbPop() {
+  nbPop.hidden = !nbPop.hidden;
+  if (!nbPop.hidden) { nbName.value = ""; nbName.focus(); }
+}
+async function createBoardFromPop() {
+  const name = nbName.value.trim();
+  if (!name) return;
+  try {
+    const res = await fetch("/api/boards", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "create", name }),
+    });
+    if (res.ok) {
+      location.search = "?board=" + encodeURIComponent(name);
+    } else {
+      nbName.style.borderColor = "var(--danger)";
+    }
+  } catch { /* ignore */ }
+}
+nbName.addEventListener("keydown", (e) => { if (e.key === "Enter") createBoardFromPop(); });
+
+// ---------- Web Agent 聊天面板 ----------
+const chatLauncher = document.getElementById("chatLauncher");
+const chatPanel = document.getElementById("chatPanel");
+const chatMsgs = document.getElementById("chatMsgs");
+const chatText = document.getElementById("chatText");
+const chatSend = document.getElementById("chatSend");
+let chatBusy = false;
+let historyLoaded = false;
+
+/** 探测是否为 web-agent 模式（服务器挂了 /api/agent/info 才显示聊天入口） */
+async function initAgent() {
+  try {
+    const res = await fetch("/api/agent/info");
+    if (!res.ok) return;
+    const info = await res.json();
+    if (!info.ok) return;
+    chatLauncher.hidden = false;
+    document.getElementById("chatModel").textContent = info.model || "";
+    if (!info.configured) addMsg("agent", "⚠️ " + tr("noCfg"));
+  } catch { /* 非 agent 模式，保持隐藏 */ }
+}
+function openChat() {
+  chatPanel.hidden = false;
+  chatLauncher.hidden = true;
+  requestAnimationFrame(() => chatPanel.classList.remove("closed"));
+  if (!historyLoaded) { historyLoaded = true; loadHistory(); }
+  chatText.focus();
+}
+function closeChat() {
+  chatPanel.classList.add("closed");
+  chatLauncher.hidden = false;
+  setTimeout(() => { if (chatPanel.classList.contains("closed")) chatPanel.hidden = true; }, 380);
+}
+async function loadHistory() {
+  try {
+    const res = await fetch("/api/chat/history");
+    const data = await res.json();
+    for (const m of data.messages ?? []) addMsg(m.role === "user" ? "user" : "agent", m.content);
+  } catch { /* ignore */ }
+}
+function addMsg(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  chatMsgs.appendChild(div);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  return div;
+}
+function addThinking() {
+  const div = document.createElement("div");
+  div.className = "msg agent thinking";
+  div.innerHTML = "<i></i><i></i><i></i>";
+  chatMsgs.appendChild(div);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  return div;
+}
+function autoGrow() {
+  chatText.style.height = "auto";
+  chatText.style.height = Math.min(chatText.scrollHeight, 96) + "px";
+}
+async function sendChat() {
+  const text = chatText.value.trim();
+  if (!text || chatBusy) return;
+  addMsg("user", text);
+  chatText.value = "";
+  autoGrow();
+  chatBusy = true;
+  chatSend.disabled = true;
+  const thinking = addThinking();
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, board }),
+    });
+    const data = await res.json().catch(() => ({}));
+    thinking.remove();
+    addMsg("agent", res.ok ? (data.reply || "…") : "⚠️ " + (data.error || ("HTTP " + res.status)));
+  } catch {
+    thinking.remove();
+    addMsg("agent", tr("netErr"));
+  }
+  chatBusy = false;
+  chatSend.disabled = false;
+  chatText.focus();
+}
+chatLauncher.addEventListener("click", openChat);
+document.getElementById("chatClose").addEventListener("click", closeChat);
+chatSend.addEventListener("click", sendChat);
+chatText.addEventListener("input", autoGrow);
+chatText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
+});
+initAgent();
 initBoard();
 </script>
 </body>

@@ -58,19 +58,21 @@ The same tool is available over MCP (stdio), sharing all logic with the pi exten
 
 Or run it directly: `npm run mcp`.
 
-### As a standalone web canvas bridged to your own agent (ACP)
+### As a standalone web canvas bridged to your own agent
 
-Run a self-contained canvas server with a chat panel — the page gets a slide-in chat card on the left where you talk to **your own installed agent CLI**, which draws on the canvas through the handdraw MCP server. The bridge speaks [ACP](https://agentclientprotocol.com) (Agent Client Protocol, the same protocol Zed uses), so no built-in LLM and no API keys to configure — it uses your agent's existing login:
+Run a self-contained canvas server with a chat panel — the page gets a slide-in chat card on the left where you talk to **your own installed agent**, which draws on the canvas through the handdraw tools. No built-in LLM and no API keys to configure — it uses your agent's existing login:
 
 ```bash
-npm run agent                              # auto-detects: claude → codex → gemini
-HANDDRAW_AGENT_BACKEND=codex npm run agent # pick a backend explicitly
+npm run agent                              # default: pi
+HANDDRAW_AGENT_BACKEND=codex npm run agent # or claude-code / codex / gemini
 HANDDRAW_ACP_CMD="my-acp-agent --flag" npm run agent  # any ACP agent command
+HANDDRAW_PI_ARGS="--model anthropic/claude-sonnet-4-5" npm run agent  # extra args for the pi backend
 ```
 
-- Backends: `claude-code` / `codex` (via `@zed-industries/*-acp` adapters, fetched by npx) and `gemini` (built-in `--experimental-acp`)
+- **pi (default)** — bridged via pi's built-in `--mode rpc` (JSONL), reusing your globally installed handdraw extension; the chat session persists in `boards/.pi-web-session/` across restarts
+- **claude-code / codex / gemini** — bridged via [ACP](https://agentclientprotocol.com) (Agent Client Protocol, the same protocol Zed uses; `@zed-industries/*-acp` adapters fetched by npx, or gemini's built-in `--experimental-acp`), with the handdraw MCP server injected into the ACP session
 - The chat panel (floating card, collapsible) only appears in this mode; the bottom bar also has a **＋** button to create new boards
-- Tool permission requests from the agent are auto-approved (`HANDDRAW_ACP_AUTO_APPROVE=0` to reject instead); messages time out after 10 min (`HANDDRAW_AGENT_TIMEOUT_MS`)
+- ACP tool permission requests are auto-approved (`HANDDRAW_ACP_AUTO_APPROVE=0` to reject); messages time out after 10 min (`HANDDRAW_AGENT_TIMEOUT_MS`)
 - Chat API: `GET /api/agent/info`, `GET /api/chat/history`, `POST /api/chat`, `POST /api/chat/reset`
 
 ## Usage
@@ -94,7 +96,7 @@ Once installed, you don't call anything directly — just ask:
 |---|---|
 | `index.ts` | pi extension shell: registers the `handdraw_canvas` tool |
 | `mcp-server.ts` | MCP server shell (stdio): same tool for any MCP-capable agent |
-| `web-agent.ts` | Standalone web canvas + chat bridge: ACP client that relays the in-page chat to your own agent CLI (claude code / codex / gemini) |
+| `web-agent.ts` | Standalone web canvas + chat bridge: relays the in-page chat to your own agent — pi via `--mode rpc` (default), or claude code / codex / gemini via ACP |
 | `core.ts` | Agent-agnostic core: shared JSON schema, tool guidelines, canvas server lifecycle, draw/update/remove/status/clear logic |
 | `draw.ts` | Drawing language → rough.js strokes; stroke sequencing for the pen animation |
 | `handwriting.ts` | Stroke-by-stroke handwriting data (Chinese glyph data from `hanzi-writer-data`) |

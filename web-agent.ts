@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 /**
- * web-agent.ts — 独立 Web 画布 + 外部 agent 聊天桥（ACP 协议）
+ * web-agent.ts — 独立 Web 画布 + 外部 agent 聊天桥
  *
  * 启动画布服务器，并在页面左侧提供一个可推拉的聊天面板。
- * 聊天后端不是内置 LLM，而是通过 ACP（Agent Client Protocol，Zed 同款）
- * 桥接到你自己安装的 agent CLI——claude code / codex / gemini 等。
- * agent 通过 ACP session 里注入的 handdraw MCP server 在画布上实时作画。
+ * 聊天后端不是内置 LLM，而是桥接到你自己安装的 agent：
+ *
+ * - pi（默认）：走 pi 自带的 --mode rpc（JSONL 协议），直接复用你已安装的
+ *   handdraw pi 扩展，会话持久保存在 boards/.pi-web-session/
+ * - claude code / codex / gemini：走 ACP（Agent Client Protocol，Zed 同款），
+ *   通过 session/new 注入 handdraw MCP server
  *
  * 配置：
- *   HANDDRAW_AGENT_BACKEND   claude-code | codex | gemini
- *                            （默认自动探测 PATH：claude → codex → gemini）
+ *   HANDDRAW_AGENT_BACKEND   pi | claude-code | codex | gemini（默认 pi）
  *   HANDDRAW_ACP_CMD         自定义 ACP agent 启动命令（覆盖预设，
  *                            如 "npx -y @zed-industries/claude-code-acp"）
- *   HANDDRAW_ACP_AUTO_APPROVE 0 = 拒绝所有工具权限请求（默认 1 = 自动批准）
+ *   HANDDRAW_PI_ARGS         给 pi 后端的额外参数（如 "--model anthropic/claude-sonnet-4-5"）
+ *   HANDDRAW_ACP_AUTO_APPROVE 0 = 拒绝 ACP agent 的工具权限请求（默认 1 = 自动批准）
  *   HANDDRAW_AGENT_TIMEOUT_MS 单条消息超时（默认 600000）
  *   端口沿用 HANDDRAW_CANVAS_PORTS（默认 8788~8791）
  *
  * 运行：
- *   npm run agent                          # 自动探测
+ *   npm run agent                          # 默认 pi
  *   HANDDRAW_AGENT_BACKEND=codex npm run agent
  *
  * HTTP API：
@@ -27,62 +30,246 @@
  *   POST /api/chat/reset    → 清空聊天记录并重开 agent 会话
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { spawn, exec, execSync, type ChildProcess } from "node:child_process";
+import { spawn, exec, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getCanvasServer } from "./canvas-server";
+import { BOARDS_DIR, getCanvasServer } from "./canvas-server";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MCP_SERVER = join(__dirname, "mcp-server.ts");
 
 const AUTO_APPROVE = process.env.HANDDRAW_ACP_AUTO_APPROVE !== "0";
 const PROMPT_TIMEOUT = Number(process.env.HANDDRAW_AGENT_TIMEOUT_MS ?? 600_000);
-const INIT_TIMEOUT = 180_000; // 首次 npx 下载适配器可能较慢
+const INIT_TIMEOUT = 180_000; // pi 首次启动加载扩展 / npx 首次下载适配器都可能较慢
+
+/** 追加给 agent 的场景说明（pi 用 --append-system-prompt；ACP 后端拼在每条消息前缀里） */
+const SCENARIO_PROMPT =
+  "你现在处在一个网页画布聊天场景中：用户通过浏览器页面左侧的聊天框和你对话。" +
+  "你可以使用 handdraw_canvas / handdraw_board 工具在手绘风实时画布上边画边讲，绘制过程用户实时可见。" +
+  "每条用户消息开头会注明用户正在查看的画板名，画图/改图请把 board 参数设为该画板名。" +
+  "回复保持简洁口语化；纯聊天不要调用工具。";
 
 // ---------------------------------------------------------------------------
-// ACP agent 后端预设
+// 后端抽象
 // ---------------------------------------------------------------------------
 
-interface Backend {
-  label: string;
-  cmd: string;
-  args: string[];
+interface AgentSession {
+  readonly label: string;
+  readonly alive: boolean;
+  start(): Promise<void>;
+  prompt(text: string, timeoutMs: number): Promise<string>;
+  /** 清空上下文（尽量保进程） */
+  reset(): Promise<void>;
+  kill(): void;
 }
 
-const BACKENDS: Record<string, Backend> = {
+type BackendSpec =
+  | { kind: "pi"; label: string }
+  | { kind: "acp"; label: string; cmd: string; args: string[] };
+
+const ACP_BACKENDS: Record<string, { label: string; cmd: string; args: string[] }> = {
   "claude-code": { label: "Claude Code", cmd: "npx", args: ["-y", "@zed-industries/claude-code-acp"] },
   codex: { label: "Codex", cmd: "npx", args: ["-y", "@zed-industries/codex-acp"] },
   gemini: { label: "Gemini CLI", cmd: "gemini", args: ["--experimental-acp"] },
 };
 
-function resolveBackend(): Backend & { name: string } {
+function resolveBackend(): BackendSpec {
   if (process.env.HANDDRAW_ACP_CMD) {
     const parts = process.env.HANDDRAW_ACP_CMD.split(/\s+/).filter(Boolean);
-    return { name: "custom", label: process.env.HANDDRAW_ACP_CMD, cmd: parts[0], args: parts.slice(1) };
+    return { kind: "acp", label: process.env.HANDDRAW_ACP_CMD, cmd: parts[0], args: parts.slice(1) };
   }
-  const name = process.env.HANDDRAW_AGENT_BACKEND;
-  if (name) {
-    const b = BACKENDS[name];
-    if (!b) throw new Error(`未知 HANDDRAW_AGENT_BACKEND: ${name}（可选 ${Object.keys(BACKENDS).join(" / ")}）`);
-    return { ...b, name };
-  }
-  // 自动探测
-  const has = (bin: string) => {
-    try {
-      execSync(`command -v ${bin}`, { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (has("claude")) return { ...BACKENDS["claude-code"], name: "claude-code" };
-  if (has("codex")) return { ...BACKENDS["codex"], name: "codex" };
-  if (has("gemini")) return { ...BACKENDS["gemini"], name: "gemini" };
-  return { ...BACKENDS["claude-code"], name: "claude-code" };
+  const name = process.env.HANDDRAW_AGENT_BACKEND ?? "pi";
+  if (name === "pi") return { kind: "pi", label: "pi" };
+  const b = ACP_BACKENDS[name];
+  if (!b) throw new Error(`未知 HANDDRAW_AGENT_BACKEND: ${name}（可选 pi / ${Object.keys(ACP_BACKENDS).join(" / ")}）`);
+  return { kind: "acp", ...b };
 }
 
 // ---------------------------------------------------------------------------
-// ACP client（stdio NDJSON JSON-RPC 2.0）
+// pi 后端（--mode rpc，JSONL）
+// ---------------------------------------------------------------------------
+
+interface PiMsg {
+  type?: string;
+  id?: string;
+  command?: string;
+  success?: boolean;
+  data?: unknown;
+  error?: string;
+  method?: string;
+  assistantMessageEvent?: { type?: string; delta?: string };
+  [key: string]: unknown;
+}
+
+class PiRpcSession implements AgentSession {
+  readonly label = "pi";
+  alive = false;
+  private proc: ChildProcess | null = null;
+  private buf = "";
+  private nextId = 1;
+  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private turnText = "";
+  private settledResolve: (() => void) | null = null;
+
+  constructor(private canvasPort: number) {}
+
+  async start(): Promise<void> {
+    const sessionDir = join(BOARDS_DIR, ".pi-web-session");
+    mkdirSync(sessionDir, { recursive: true });
+    const extraArgs = (process.env.HANDDRAW_PI_ARGS ?? "").split(/\s+/).filter(Boolean);
+    const proc = spawn(
+      "pi",
+      [
+        "--mode", "rpc",
+        "--session-dir", sessionDir,
+        "--name", "handdraw-web-chat",
+        "--append-system-prompt", SCENARIO_PROMPT,
+        ...extraArgs,
+      ],
+      {
+        cwd: process.cwd(),
+        // 让 handdraw 扩展找到本进程的画布服务器（remote 复用模式，走 HTTP 推送）
+        env: { ...process.env, HANDDRAW_CANVAS_PORTS: String(this.canvasPort) },
+        stdio: ["pipe", "pipe", "pipe"],
+      }
+    );
+    this.proc = proc;
+    this.alive = true;
+    proc.stdout!.on("data", (chunk: Buffer) => this.onData(chunk.toString("utf8")));
+    proc.stderr!.on("data", (chunk: Buffer) => {
+      const line = chunk.toString("utf8").trim();
+      if (line) console.error(`[pi] ${line.slice(0, 300)}`);
+    });
+    const onDead = (err?: Error) => {
+      this.alive = false;
+      for (const [, p] of this.pending) p.reject(err ?? new Error("pi 进程退出"));
+      this.pending.clear();
+      this.settledResolve?.();
+      this.settledResolve = null;
+    };
+    proc.on("exit", () => onDead());
+    proc.on("error", (err) => onDead(err));
+
+    // 等 pi 就绪（加载扩展、恢复会话）
+    await this.command({ type: "get_state" }, INIT_TIMEOUT);
+  }
+
+  private onData(chunk: string): void {
+    this.buf += chunk;
+    let idx: number;
+    while ((idx = this.buf.indexOf("\n")) >= 0) {
+      let line = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(idx + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if (!line) continue;
+      let msg: PiMsg;
+      try {
+        msg = JSON.parse(line) as PiMsg;
+      } catch {
+        continue;
+      }
+      this.onMessage(msg);
+    }
+  }
+
+  private onMessage(msg: PiMsg): void {
+    if (msg.type === "response" && msg.id != null) {
+      const p = this.pending.get(msg.id);
+      if (p) {
+        this.pending.delete(msg.id);
+        if (msg.success === false) p.reject(new Error(msg.error ?? `${msg.command} 失败`));
+        else p.resolve(msg.data);
+      }
+      return;
+    }
+    if (msg.type === "message_update" && msg.assistantMessageEvent?.type === "text_delta") {
+      this.turnText += msg.assistantMessageEvent.delta ?? "";
+      return;
+    }
+    if (msg.type === "agent_settled") {
+      this.settledResolve?.();
+      this.settledResolve = null;
+      return;
+    }
+    // 扩展 UI 对话框（select/confirm/input/editor）：回 cancelled 防止 agent 卡住
+    if (
+      msg.type === "extension_ui_request" &&
+      msg.id &&
+      ["select", "confirm", "input", "editor"].includes(String(msg.method))
+    ) {
+      this.sendRaw({ type: "extension_ui_response", id: msg.id, cancelled: true });
+    }
+  }
+
+  private sendRaw(obj: Record<string, unknown>): void {
+    if (this.proc?.stdin?.writable) this.proc.stdin.write(JSON.stringify(obj) + "\n");
+  }
+
+  private command(cmd: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    const id = `req-${this.nextId++}`;
+    return new Promise((resolveCmd, rejectCmd) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        rejectCmd(new Error(`${String(cmd.type)} 超时`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolveCmd(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          rejectCmd(e);
+        },
+      });
+      this.sendRaw({ ...cmd, id });
+    });
+  }
+
+  async prompt(text: string, timeoutMs: number): Promise<string> {
+    this.turnText = "";
+    const settled = new Promise<void>((res) => {
+      this.settledResolve = res;
+    });
+    await this.command({ type: "prompt", message: text }, 60_000);
+    let timer: ReturnType<typeof setTimeout>;
+    await Promise.race([
+      settled,
+      new Promise<void>((_, rej) => {
+        timer = setTimeout(() => {
+          this.sendRaw({ type: "abort" });
+          rej(new Error("prompt 超时，已中止"));
+        }, timeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer!));
+    return this.turnText.trim();
+  }
+
+  /** 新开会话（保留进程和已加载的扩展） */
+  async reset(): Promise<void> {
+    if (this.alive) {
+      try {
+        await this.command({ type: "new_session" }, 30_000);
+      } catch {
+        /* 失败就整体重启 */
+      }
+    }
+  }
+
+  kill(): void {
+    this.alive = false;
+    try {
+      this.proc?.kill();
+    } catch {
+      /* ignore */
+    }
+    this.proc = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ACP 后端（claude-code / codex / gemini；stdio NDJSON JSON-RPC 2.0）
 // ---------------------------------------------------------------------------
 
 interface JsonRpcMsg {
@@ -94,23 +281,25 @@ interface JsonRpcMsg {
   error?: { code: number; message: string };
 }
 
-class AcpClient {
+class AcpSession implements AgentSession {
+  readonly label: string;
+  alive = false;
   private proc: ChildProcess | null = null;
   private nextId = 1;
   private pending = new Map<number | string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private buf = "";
-  /** 当前 prompt turn 累积的 agent 文本 */
   private turnText = "";
-  sessionId: string | null = null;
-  alive = false;
+  private sessionId: string | null = null;
 
   constructor(
-    private backend: Backend,
+    private spec: { label: string; cmd: string; args: string[] },
     private canvasPort: number
-  ) {}
+  ) {
+    this.label = spec.label;
+  }
 
   async start(): Promise<void> {
-    const proc = spawn(this.backend.cmd, this.backend.args, {
+    const proc = spawn(this.spec.cmd, this.spec.args, {
       cwd: process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -120,19 +309,16 @@ class AcpClient {
     proc.stdout!.on("data", (chunk: Buffer) => this.onData(chunk.toString("utf8")));
     proc.stderr!.on("data", (chunk: Buffer) => {
       const line = chunk.toString("utf8").trim();
-      if (line) console.error(`[acp:${this.backend.name ?? "agent"}] ${line.slice(0, 300)}`);
+      if (line) console.error(`[acp] ${line.slice(0, 300)}`);
     });
-    proc.on("exit", (code) => {
+    const onDead = (err?: Error) => {
       this.alive = false;
       this.sessionId = null;
-      for (const [, p] of this.pending) p.reject(new Error(`agent 进程退出 (code=${code})`));
+      for (const [, p] of this.pending) p.reject(err ?? new Error("agent 进程退出"));
       this.pending.clear();
-    });
-    proc.on("error", (err) => {
-      this.alive = false;
-      for (const [, p] of this.pending) p.reject(err);
-      this.pending.clear();
-    });
+    };
+    proc.on("exit", () => onDead());
+    proc.on("error", (err) => onDead(err));
 
     const init = (await this.request(
       "initialize",
@@ -142,10 +328,10 @@ class AcpClient {
         clientInfo: { name: "handdraw-web", title: "Handdraw Web Canvas", version: "0.1.0" },
       },
       INIT_TIMEOUT
-    )) as { agentCapabilities?: unknown; authMethods?: Array<unknown> };
+    )) as { authMethods?: Array<{ id?: string }> };
     if (init?.authMethods && init.authMethods.length > 0) {
       // authMethods 只是「如需要可用」的认证方式；CLI 已登录时 session/new 直接可用，先试再说
-      console.error(`[acp] agent 声明了认证方式（${init.authMethods.map((m) => (m as { id?: string }).id).join(", ")}），已跳过，如后续报错请先登录该 agent`);
+      console.error(`[acp] agent 声明了认证方式（${init.authMethods.map((m) => m.id).join(", ")}），已跳过，如后续报错请先登录该 agent`);
     }
 
     const s = (await this.request(
@@ -157,7 +343,6 @@ class AcpClient {
             name: "handdraw",
             command: "npx",
             args: ["tsx", MCP_SERVER],
-            // 让 MCP server 把笔画推送到本进程的画布端口（remote 复用模式）
             env: [{ name: "HANDDRAW_CANVAS_PORTS", value: String(this.canvasPort) }],
           },
         ],
@@ -186,7 +371,6 @@ class AcpClient {
   }
 
   private onMessage(msg: JsonRpcMsg): void {
-    // 响应（有 id 且无 method）
     if (msg.id != null && !msg.method) {
       const p = this.pending.get(msg.id);
       if (p) {
@@ -196,7 +380,6 @@ class AcpClient {
       }
       return;
     }
-    // agent → client 通知
     if (msg.method === "session/update") {
       const update = (msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } })?.update;
       if (update?.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
@@ -204,7 +387,6 @@ class AcpClient {
       }
       return;
     }
-    // agent → client 请求：权限
     if (msg.method === "session/request_permission" && msg.id != null) {
       const params = msg.params as { options?: Array<{ optionId: string; kind?: string }> };
       const options = params?.options ?? [];
@@ -217,15 +399,13 @@ class AcpClient {
       this.send({ jsonrpc: "2.0", id: msg.id, result: { outcome } });
       return;
     }
-    // 其他 agent → client 请求（fs/*、terminal/* 等）：声明过不支持，回 Method not found
     if (msg.method && msg.id != null) {
       this.send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `${msg.method} not supported by client` } });
     }
   }
 
   private send(msg: JsonRpcMsg): void {
-    if (!this.proc?.stdin?.writable) return;
-    this.proc.stdin.write(JSON.stringify(msg) + "\n");
+    if (this.proc?.stdin?.writable) this.proc.stdin.write(JSON.stringify(msg) + "\n");
   }
 
   private request(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
@@ -252,15 +432,16 @@ class AcpClient {
     });
   }
 
-  async prompt(text: string): Promise<string> {
+  async prompt(text: string, timeoutMs: number): Promise<string> {
     if (!this.sessionId) throw new Error("agent 会话未建立");
     this.turnText = "";
-    await this.request(
-      "session/prompt",
-      { sessionId: this.sessionId, prompt: [{ type: "text", text }] },
-      PROMPT_TIMEOUT
-    );
+    await this.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, timeoutMs);
     return this.turnText.trim();
+  }
+
+  /** ACP 没有通用的重置方法：杀掉进程，下条消息重开会话 */
+  async reset(): Promise<void> {
+    this.kill();
   }
 
   kill(): void {
@@ -280,21 +461,26 @@ class AcpClient {
 // ---------------------------------------------------------------------------
 
 const BACKEND = resolveBackend();
-let client: AcpClient | null = null;
-let starting: Promise<AcpClient> | null = null;
+let session: AgentSession | null = null;
+let starting: Promise<AgentSession> | null = null;
 let busy = false;
 
 const displayHistory: Array<{ role: "user" | "agent"; content: string }> = [];
 
-async function ensureAgent(canvasPort: number): Promise<AcpClient> {
-  if (client?.alive && client.sessionId) return client;
+function isReady(s: AgentSession | null): s is AgentSession {
+  return Boolean(s?.alive);
+}
+
+async function ensureAgent(canvasPort: number): Promise<AgentSession> {
+  if (isReady(session)) return session;
   if (starting) return starting;
   starting = (async () => {
-    const c = new AcpClient(BACKEND, canvasPort);
-    await c.start();
-    client = c;
+    const s: AgentSession =
+      BACKEND.kind === "pi" ? new PiRpcSession(canvasPort) : new AcpSession(BACKEND, canvasPort);
+    await s.start();
+    session = s;
     starting = null;
-    return c;
+    return s;
   })().catch((e) => {
     starting = null;
     throw e;
@@ -304,10 +490,8 @@ async function ensureAgent(canvasPort: number): Promise<AcpClient> {
 
 async function chatWithAgent(message: string, board: string, canvasPort: number): Promise<string> {
   const agent = await ensureAgent(canvasPort);
-  const context =
-    `[来自画布网页的实时聊天。用户正在浏览器里查看画板「${board || "default"}」。` +
-    `如果需要用 handdraw 工具画图/改图，请把 board 参数设为这个画板名。]\n\n${message}`;
-  const reply = await agent.prompt(context);
+  const context = `[用户正在浏览器里查看画板「${board || "default"}」。]\n\n${message}`;
+  const reply = await agent.prompt(context, PROMPT_TIMEOUT);
   return reply || "（agent 没有文字回复，但它可能已经动手画了）";
 }
 
@@ -347,8 +531,10 @@ function makeAgentApi(canvasPortRef: () => number) {
     }
     if (url.pathname === "/api/chat/reset" && req.method === "POST") {
       displayHistory.length = 0;
-      client?.kill();
-      client = null;
+      if (session) {
+        await session.reset().catch(() => session?.kill());
+        if (!isReady(session)) session = null;
+      }
       json(200, { ok: true });
       return true;
     }
@@ -391,7 +577,7 @@ function makeAgentApi(canvasPortRef: () => number) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log(`   agent 后端: ${BACKEND.label}（ACP）`);
+  console.log(`   agent 后端: ${BACKEND.label}${BACKEND.kind === "pi" ? "（rpc 模式）" : "（ACP）"}`);
   const server = getCanvasServer();
   server.setExtraHandler(makeAgentApi(() => server.getPort()));
   const mode = await server.start();
@@ -409,7 +595,7 @@ async function main() {
 }
 
 function shutdown() {
-  client?.kill();
+  session?.kill();
   getCanvasServer().stop();
   process.exit(0);
 }

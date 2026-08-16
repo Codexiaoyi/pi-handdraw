@@ -67,6 +67,42 @@
     50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.05); }
   }
   @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+  /* ---------- Agent 工作呼吸灯（抄自 AIPex） ---------- */
+  /* AIPex Thinking.tsx：三个蓝色小点交错脉冲（animate-pulse 1.4s，延迟 0/200/400ms） */
+  .agent-pulse { display: inline-flex; align-items: center; gap: 4px; }
+  .agent-pulse i {
+    width: 8px; height: 8px; border-radius: 50%; background: #3b82f6; /* blue-500 */
+    animation: agentPulse 1.4s cubic-bezier(.4, 0, .6, 1) infinite;
+  }
+  .agent-pulse i:nth-child(2) { animation-delay: 200ms; }
+  .agent-pulse i:nth-child(3) { animation-delay: 400ms; }
+  @keyframes agentPulse { 50% { opacity: .5; } } /* tailwind animate-pulse 原样 */
+  .agent-label { color: #2563eb; font-weight: 500; }
+  /* aipex-company breathing-border-overlay.tsx 原样照搬：4 层递进蓝色 inset 光晕呼吸 */
+  #breath {
+    position: fixed; inset: 0; pointer-events: none; z-index: 9;
+    opacity: 0; transition: opacity 0.5s ease-in-out;
+  }
+  body.agent-working #breath { opacity: 1; animation: breatheInwardGlow 2.5s ease-in-out infinite; }
+  @keyframes breatheInwardGlow {
+    0%, 100% {
+      box-shadow:
+        inset 0 0 12px 3px rgba(37, 99, 235, 0.35),
+        inset 0 0 20px 5px rgba(59, 130, 246, 0.28),
+        inset 0 0 28px 6px rgba(96, 165, 250, 0.22),
+        inset 0 0 35px 8px rgba(147, 197, 253, 0.15);
+    }
+    50% {
+      box-shadow:
+        inset 0 0 20px 5px rgba(37, 99, 235, 0.7),
+        inset 0 0 30px 7px rgba(59, 130, 246, 0.6),
+        inset 0 0 40px 9px rgba(96, 165, 250, 0.5),
+        inset 0 0 50px 11px rgba(147, 197, 253, 0.35);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .agent-pulse i, body.agent-working #breath { animation: none; }
+  }
   .controls { bottom: 18px; padding: 6px; gap: 4px; }
   /* 幽灵按钮：透明底，hover 才浮现 */
   button, select {
@@ -285,7 +321,8 @@
       </g>
     </g>
   </svg>
-  <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
+  <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="agent-pulse" id="agentPulse" hidden><i></i><i></i><i></i><span class="agent-label">AI 思考 / 作画中…</span></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
+  <div id="breath"></div>
   <div class="controls hud">
     <select id="boardSelect" onchange="switchBoard(this.value)"></select>
     <button onclick="toggleNbPop()" id="btnNewBoard" title="新建画板">＋</button>
@@ -800,6 +837,12 @@ document.getElementById("selQuote").addEventListener("click", () => {
 
 // ---------- WebSocket 实时接收 ----------
 let ws = null;
+/** Agent 工作呼吸灯：思考+作画期间点亮（AIPex 风格三点脉冲 + 整页呼吸光环） */
+const agentPulse = document.getElementById("agentPulse");
+function setAgentLight(working) {
+  document.body.classList.toggle("agent-working", working);
+  agentPulse.hidden = !working;
+}
 /** 连接后收到的第一批 = 服务器回放的历史内容，直接静态渲染，不重新播放动画 */
 let expectReplay = true;
 function connect() {
@@ -811,6 +854,7 @@ function connect() {
     window.__msgCount = (window.__msgCount || 0) + 1;
     try {
       const msg = JSON.parse(ev.data);
+      if (msg.type === "agent") { setAgentLight(!!msg.working); return; }
       elMetaCache = null; // 画布有变动，元素元数据缓存失效
       if (msg.type === "clear") { expectReplay = false; clearCanvas(); return; }
       if (msg.type === "remove") {
@@ -839,6 +883,7 @@ function connect() {
   };
   ws.onclose = () => {
     window.__wsState = "closed";
+    setAgentLight(false);
     expectReplay = true; // 重连后服务器会再次回放全量历史
     wsDot.className = "dot off";
     labelEl.textContent = tr("disconnected");

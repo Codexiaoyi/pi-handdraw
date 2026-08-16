@@ -123,6 +123,8 @@ export class CanvasServer {
   private wss: WebSocketServer | null = null;
   /** 每个连接订阅的画板 */
   private clients = new Map<WebSocket, string>();
+  /** agent 是否在工作（思考+作画）：新连接会同步该状态 */
+  private agentWorking = false;
   private pageHtml = "";
   private actualPort = 0;
   /** 额外路由（web-agent 模式注册聊天 API 用），在内置路由全部未命中后调用 */
@@ -360,6 +362,12 @@ export class CanvasServer {
         void (async () => {
           const url = new URL(req.url ?? "/", "http://localhost");
           if (url.pathname === "/" || url.pathname === "/index.html") {
+            // 每次请求重新读页面文件：改 canvas-page.html 后只需刷新浏览器，不必重启服务器
+            try {
+              this.pageHtml = readFileSync(join(__dirname, "canvas-page.html"), "utf8");
+            } catch {
+              /* 读失败用启动时缓存 */
+            }
             res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
             res.end(this.pageHtml);
             return;
@@ -413,6 +421,14 @@ export class CanvasServer {
               res.writeHead(400);
               res.end();
             }
+            return;
+          }
+          if (req.method === "POST" && url.pathname === "/api/agent-status") {
+            // 远程进程上报 agent 工作状态（呼吸灯），广播到所有画板
+            const body = (await this.readBody(req).catch(() => ({}))) as { working?: boolean };
+            this.setAgentWorking(Boolean(body.working));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
             return;
           }
           if (req.method === "POST" && url.pathname === "/api/clear") {
@@ -475,6 +491,8 @@ export class CanvasServer {
         if (cache.length > 0) {
           ws.send(JSON.stringify({ type: "batch", strokes: cache }));
         }
+        // 同步当前 agent 工作状态（呼吸灯）
+        ws.send(JSON.stringify({ type: "agent", working: this.agentWorking }));
       });
 
       http.on("error", (err: NodeJS.ErrnoException) => {
@@ -563,6 +581,16 @@ export class CanvasServer {
     b.nextZ = 1;
     this.broadcast(board, JSON.stringify({ type: "clear" }));
     this.persist(board);
+  }
+
+  /** Agent 工作状态（思考+作画中）：广播给所有画板页面，驱动页面呼吸灯 */
+  setAgentWorking(working: boolean): void {
+    if (this.agentWorking === working) return;
+    this.agentWorking = working;
+    const msg = JSON.stringify({ type: "agent", working });
+    for (const [ws] of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(msg);
+    }
   }
 
   private broadcast(board: string, msg: string): void {

@@ -15,6 +15,7 @@ import {
   executeCanvasAction,
   executeBoardAction,
   shutdownCanvasServer,
+  setAgentWorking,
   PARAMS_SCHEMA,
   BOARD_PARAMS_SCHEMA,
   toolDescription,
@@ -24,7 +25,16 @@ import {
 } from "./core";
 
 export default function (pi: ExtensionAPI) {
+  // agent 工作期间（思考 + 调用工具作画都算）点亮画布页面呼吸灯
+  pi.on("agent_start", () => {
+    void setAgentWorking(true);
+  });
+  pi.on("agent_end", () => {
+    void setAgentWorking(false);
+  });
+
   pi.on("session_shutdown", () => {
+    void setAgentWorking(false);
     shutdownCanvasServer();
   });
 

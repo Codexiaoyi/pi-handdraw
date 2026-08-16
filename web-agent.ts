@@ -35,6 +35,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BOARDS_DIR, getCanvasServer } from "./canvas-server";
+import { setAgentWorking } from "./core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MCP_SERVER = join(__dirname, "mcp-server.ts");
@@ -491,8 +492,14 @@ async function ensureAgent(canvasPort: number): Promise<AgentSession> {
 async function chatWithAgent(message: string, board: string, canvasPort: number): Promise<string> {
   const agent = await ensureAgent(canvasPort);
   const context = `[用户正在浏览器里查看画板「${board || "default"}」。]\n\n${message}`;
-  const reply = await agent.prompt(context, PROMPT_TIMEOUT);
-  return reply || "（agent 没有文字回复，但它可能已经动手画了）";
+  // agent 工作期间（思考+作画）点亮画布呼吸灯
+  await setAgentWorking(true);
+  try {
+    const reply = await agent.prompt(context, PROMPT_TIMEOUT);
+    return reply || "（agent 没有文字回复，但它可能已经动手画了）";
+  } finally {
+    await setAgentWorking(false);
+  }
 }
 
 // ---------------------------------------------------------------------------

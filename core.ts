@@ -341,6 +341,32 @@ function openInBrowser(url: string) {
 
 let canvasServerMode: "local" | "remote" | null = null;
 
+/** 最近一次 agent 工作状态：服务器未启动时先挂起，启动成功后补发 */
+let pendingAgentWorking = false;
+
+/**
+ * 上报 agent 工作状态（思考+作画中），驱动画布页面呼吸灯。
+ * 服务器未启动时仅记录状态；失败静默，不影响主流程。
+ */
+export async function setAgentWorking(working: boolean): Promise<void> {
+  pendingAgentWorking = working;
+  const server = getCanvasServer();
+  if (!server.isRunning()) return;
+  try {
+    if (canvasServerMode === "remote") {
+      await fetch(`http://localhost:${server.getPort()}/api/agent-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ working }),
+      });
+    } else {
+      server.setAgentWorking(working);
+    }
+  } catch {
+    /* 呼吸灯失败不影响主流程 */
+  }
+}
+
 async function ensureCanvasServer(openBrowser: boolean): Promise<string | null> {
   const server = getCanvasServer();
   try {
@@ -357,6 +383,8 @@ async function ensureCanvasServer(openBrowser: boolean): Promise<string | null> 
     } else {
       canvasServerMode = "local";
     }
+    // 补发挂起的 agent 工作状态（agent 可能在首次动笔前就开始思考）
+    if (pendingAgentWorking) void setAgentWorking(true);
     return `http://localhost:${server.getPort()}`;
   } catch {
     canvasServerMode = null;

@@ -31,7 +31,8 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { spawn, exec, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BOARDS_DIR, getCanvasServer } from "./canvas-server";
@@ -255,6 +256,31 @@ class PiRpcSession implements AgentSession {
       } catch {
         /* 失败就整体重启 */
       }
+    }
+  }
+
+  /** RPC get_state（模型、思考级别、会话名等）；失败返回 null */
+  async getState(): Promise<Record<string, unknown> | null> {
+    if (!this.alive) return null;
+    try {
+      return (await this.command({ type: "get_state" }, 10_000)) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  /** RPC get_commands（扩展命令 + skills）；失败返回 null */
+  async getCommands(): Promise<
+    Array<{ name?: string; description?: string; source?: string; location?: string; path?: string }>
+  > | null {
+    if (!this.alive) return null;
+    try {
+      const data = (await this.command({ type: "get_commands" }, 10_000)) as {
+        commands?: Array<{ name?: string; description?: string; source?: string; location?: string; path?: string }>;
+      };
+      return data?.commands ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -521,6 +547,97 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// agent 运行信息聚合（右上角浮窗数据源）
+// ---------------------------------------------------------------------------
+
+interface NameItem {
+  name: string;
+  location?: string;
+  description?: string;
+}
+
+/** 扫描目录条目：子目录名 + 顶层 .ts/.js/.md 文件名（skillDir 模式要求子目录含 SKILL.md） */
+function scanEntries(dir: string, location: string, opts?: { skillDir?: boolean }): NameItem[] {
+  const out: NameItem[] = [];
+  try {
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith(".")) continue;
+      try {
+        const full = join(dir, name);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (!opts?.skillDir || existsSync(join(full, "SKILL.md"))) out.push({ name, location });
+        } else if (/\.(ts|js|md)$/.test(name)) {
+          out.push({ name: name.replace(/\.(ts|js|md)$/, ""), location });
+        }
+      } catch {
+        /* 跳过坏条目 */
+      }
+    }
+  } catch {
+    /* 目录不存在 */
+  }
+  return out;
+}
+
+/** settings.json 里的 mcpServers（用户级 + 项目级） */
+function scanMcpServers(): NameItem[] {
+  const out: NameItem[] = [];
+  const files: Array<[string, string]> = [
+    [join(homedir(), ".pi/agent/settings.json"), "用户级"],
+    [join(process.cwd(), ".pi/settings.json"), "项目级"],
+  ];
+  for (const [file, location] of files) {
+    try {
+      const cfg = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: Record<string, unknown> };
+      for (const name of Object.keys(cfg.mcpServers ?? {})) out.push({ name, location });
+    } catch {
+      /* 无配置 */
+    }
+  }
+  return out;
+}
+
+async function collectAgentDetail(): Promise<Record<string, unknown>> {
+  const detail: Record<string, unknown> = { backend: BACKEND.label, started: isReady(session) };
+  // 运行状态（pi RPC：模型/思考级别/会话/skills）
+  if (BACKEND.kind === "pi" && isReady(session) && session instanceof PiRpcSession) {
+    const state = await session.getState();
+    if (state) {
+      const model = state.model as { id?: string; provider?: string; name?: string } | null;
+      detail.model = model ? { id: model.id, provider: model.provider, name: model.name } : null;
+      detail.thinkingLevel = state.thinkingLevel;
+      detail.sessionName = state.sessionName;
+      detail.messageCount = state.messageCount;
+    }
+    const cmds = await session.getCommands();
+    if (cmds) {
+      detail.skills = cmds
+        .filter((c) => c.source === "skill")
+        .map((c) => ({ name: c.name, description: c.description, location: c.location }));
+      detail.extensionCommands = cmds
+        .filter((c) => c.source === "extension")
+        .map((c) => ({ name: c.name, description: c.description }));
+    }
+  }
+  // 扩展：文件系统扫描（用户级 + 项目级）
+  detail.extensions = [
+    ...scanEntries(join(homedir(), ".pi/agent/extensions"), "用户级"),
+    ...scanEntries(join(process.cwd(), ".pi/extensions"), "项目级"),
+  ];
+  // skills：RPC 拿不到时扫目录兼底
+  if (!detail.skills) {
+    detail.skills = [
+      ...scanEntries(join(homedir(), ".pi/agent/skills"), "用户级", { skillDir: true }),
+      ...scanEntries(join(process.cwd(), ".pi/skills"), "项目级", { skillDir: true }),
+    ];
+  }
+  detail.mcpServers = scanMcpServers();
+  detail.selfMcp = "handdraw-mcp：本项目自带 MCP server（npm run mcp），可供其他 agent 接入画布";
+  return detail;
+}
+
 function makeAgentApi(canvasPortRef: () => number) {
   return async function agentApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
     const json = (code: number, obj: Record<string, unknown>) => {
@@ -530,6 +647,10 @@ function makeAgentApi(canvasPortRef: () => number) {
 
     if (url.pathname === "/api/agent/info" && req.method === "GET") {
       json(200, { ok: true, backend: BACKEND.label, model: BACKEND.label, configured: true });
+      return true;
+    }
+    if (url.pathname === "/api/agent/detail" && req.method === "GET") {
+      json(200, { ok: true, ...(await collectAgentDetail()) });
       return true;
     }
     if (url.pathname === "/api/chat/history" && req.method === "GET") {

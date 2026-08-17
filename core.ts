@@ -338,6 +338,52 @@ function findOverlapHits(incoming: OverlapItem[], existing: OverlapItem[]): stri
   return [...new Set(hits)];
 }
 
+function unionRects(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+}
+
+/** 从笔画路径采样真实渲染 bbox（含描边宽度与手绘抖动余量）；无路径笔画（纯文字）返回 null */
+function strokesBBox(msgs: StrokeMsg[]): Rect | null {
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  let pad = 0;
+  let found = false;
+  for (const s of msgs) {
+    if (s.image) {
+      minX = Math.min(minX, s.image.x);
+      minY = Math.min(minY, s.image.y);
+      maxX = Math.max(maxX, s.image.x + s.image.w);
+      maxY = Math.max(maxY, s.image.y + s.image.h);
+      found = true;
+      continue;
+    }
+    if (s.isText || !s.d) continue; // 文字笔画是 SVG 片段，边界用排版估算
+    try {
+      const props = new svgPathProperties(s.d);
+      const len = props.getTotalLength();
+      if (!(len > 0)) continue;
+      const n = Math.min(48, Math.max(8, Math.ceil(len / 20)));
+      for (let i = 0; i <= n; i++) {
+        const p = props.getPointAtLength((len * i) / n);
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      pad = Math.max(pad, (s.width || 2) / 2 + 3);
+      found = true;
+    } catch {
+      /* 跳过无法解析的笔画 */
+    }
+  }
+  if (!found) return null;
+  return { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 };
+}
+
 /** path 元素 bbox（采样估算） */
 function pathBBox(d: string): { x: number; y: number; w: number; h: number } {
   try {
@@ -722,25 +768,6 @@ export async function executeCanvasAction(
     return true;
   });
 
-  // 覆盖保护：默认禁止新元素部分覆盖已有内容（update 排除被更新的元素自身）
-  if (!params.allowOverlap && validElements.length > 0 && (action === "draw" || action === "update")) {
-    const summary = (await canvasSummary(board)) as unknown as Summary;
-    const existing: OverlapItem[] = (summary.occupied ?? [])
-      .filter((o) => (action === "update" ? o.id !== params.elementId : true))
-      .map((o) => ({ x: o.x, y: o.y, w: o.w, h: o.h, tag: `${o.label ?? o.type}[${o.id}]` }));
-    const incoming: OverlapItem[] = validElements.map((el, i) => {
-      const info = toElementInfo(el);
-      return { x: info.x, y: info.y, w: info.w, h: info.h, tag: `${info.label ?? info.type}(新${i + 1})` };
-    });
-    const hits = findOverlapHits(incoming, existing);
-    if (hits.length > 0) {
-      return {
-        text: t("tool.overlap", { hits: hits.join("；"), spots: formatFreeSpots(summary) }),
-        details: { ok: false, collisions: hits },
-      };
-    }
-  }
-
   // 每个元素独立生成笔画并标记 elementId（可单独修改/删除）
   const buildOpts = (el: HandDrawElement): BuildOptions => ({
     layout: "manual",
@@ -754,39 +781,53 @@ export async function executeCanvasAction(
       return { text: t("tool.updateNeedId"), details: {} };
     }
     const el = validElements[0];
+    let info = toElementInfo(el);
+    let msgs: StrokeMsg[];
     if (el.type === "image") {
-      const info = toElementInfo(el);
-      const msgs = [imageStrokeMsg(el, board, params.elementId, info.z)];
-      const ok = await modifyCanvas(board, "update", params.elementId, msgs, info);
-      const summary = (await canvasSummary(board)) as unknown as Summary;
-      return {
-        text: ok
-          ? t("tool.updated", { id: params.elementId, label: String(info.label ?? "image"), strokes: 1, count: summary.elementCount })
-          : t("tool.elNotFound", { id: params.elementId }),
-        details: { ok, board },
-      };
+      msgs = [imageStrokeMsg(el, board, params.elementId, info.z)];
+    } else {
+      const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+      msgs = strokes.map((s) => ({
+        type: "stroke",
+        d: s.d,
+        color: s.color,
+        width: s.width,
+        dur: Math.round(s.dur * 1000),
+        fill: s.fillOnly,
+        isText: s.isText,
+        hatch: s.hatch,
+        penUp: false,
+        label: s.label,
+        elementId: params.elementId,
+      }));
+      // 真实边界回写：笔画采样 bbox ∪ 声明估算
+      const real = strokesBBox(msgs);
+      if (real) info = { ...info, ...unionRects(real, info) };
     }
-    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
-    const msgs: StrokeMsg[] = strokes.map((s) => ({
-      type: "stroke",
-      d: s.d,
-      color: s.color,
-      width: s.width,
-      dur: Math.round(s.dur * 1000),
-      fill: s.fillOnly,
-      isText: s.isText,
-      hatch: s.hatch,
-      penUp: false,
-      label: s.label,
-      elementId: params.elementId,
-    }));
-    const ok = await modifyCanvas(board, "update", params.elementId, msgs, toElementInfo(el));
+    // 覆盖保护（排除被更新的元素自身）
+    if (!params.allowOverlap) {
+      const preSummary = (await canvasSummary(board)) as unknown as Summary;
+      const existing: OverlapItem[] = (preSummary.occupied ?? [])
+        .filter((o) => o.id !== params.elementId)
+        .map((o) => ({ x: o.x, y: o.y, w: o.w, h: o.h, tag: `${o.label ?? o.type}[${o.id}]` }));
+      const hits = findOverlapHits(
+        [{ x: info.x, y: info.y, w: info.w, h: info.h, tag: `${info.label ?? info.type}(更新)` }],
+        existing
+      );
+      if (hits.length > 0) {
+        return {
+          text: t("tool.overlap", { hits: hits.join("；"), spots: formatFreeSpots(preSummary) }),
+          details: { ok: false, collisions: hits },
+        };
+      }
+    }
+    const ok = await modifyCanvas(board, "update", params.elementId, msgs, info);
     const summary = (await canvasSummary(board)) as unknown as Summary;
     return {
       text: ok
         ? t("tool.updated", {
             id: params.elementId,
-            label: String(("text" in el && el.text) || ("name" in el && el.name) || el.type),
+            label: String(info.label ?? el.type),
             strokes: msgs.length,
             count: summary.elementCount,
           })
@@ -809,22 +850,19 @@ export async function executeCanvasAction(
     };
   }
 
-  // draw：逐个元素生成笔画（带独立 id）并推送
-  const allMsgs: StrokeMsg[] = [];
-  const infos: CanvasElementInfo[] = [];
+  // draw：先生成全部笔画（纯计算无副作用）→ 采样真实 bbox → 覆盖检查 → 通过才推送
+  const built: Array<{ info: CanvasElementInfo; msgs: StrokeMsg[] }> = [];
   for (const el of validElements) {
     const elId = `el${Math.floor(Math.random() * 1e9).toString(36)}`;
-    const info = toElementInfo(el);
+    let info = toElementInfo(el);
     info.id = elId;
+    let msgs: StrokeMsg[];
     if (el.type === "image") {
       // 图片不是笔画：直接推 image 消息，页面即时渲染
-      allMsgs.push(imageStrokeMsg(el, board, elId, info.z));
-      infos.push(info);
-      continue;
-    }
-    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
-    for (const s of strokes) {
-      allMsgs.push({
+      msgs = [imageStrokeMsg(el, board, elId, info.z)];
+    } else {
+      const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+      msgs = strokes.map((s) => ({
         type: "stroke",
         d: s.d,
         color: s.color,
@@ -837,10 +875,42 @@ export async function executeCanvasAction(
         label: s.label,
         elementId: elId,
         z: info.z,
-      });
+      }));
+      // 真实边界回写：笔画采样 bbox ∪ 声明估算（文字估算仍覆盖文字区域）
+      const real = strokesBBox(msgs);
+      if (real) info = { ...info, ...unionRects(real, info) };
     }
-    infos.push(info);
+    built.push({ info, msgs });
   }
+
+  // 覆盖保护：真实 bbox vs 已有元素 + 同批互查，拒绝则整批不画
+  if (!params.allowOverlap && built.length > 0) {
+    const preSummary = (await canvasSummary(board)) as unknown as Summary;
+    const existing: OverlapItem[] = (preSummary.occupied ?? []).map((o) => ({
+      x: o.x,
+      y: o.y,
+      w: o.w,
+      h: o.h,
+      tag: `${o.label ?? o.type}[${o.id}]`,
+    }));
+    const incoming: OverlapItem[] = built.map((b, i) => ({
+      x: b.info.x,
+      y: b.info.y,
+      w: b.info.w,
+      h: b.info.h,
+      tag: `${b.info.label ?? b.info.type}(新${i + 1})`,
+    }));
+    const hits = findOverlapHits(incoming, existing);
+    if (hits.length > 0) {
+      return {
+        text: t("tool.overlap", { hits: hits.join("；"), spots: formatFreeSpots(preSummary) }),
+        details: { ok: false, collisions: hits },
+      };
+    }
+  }
+
+  const allMsgs = built.flatMap((b) => b.msgs);
+  const infos = built.map((b) => b.info);
   if (infos.length > 0) await pushToCanvas(board, allMsgs, infos);
 
   const summary = (await canvasSummary(board)) as unknown as Summary;

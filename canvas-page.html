@@ -169,6 +169,13 @@
   .agent-pop .tag { color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 0 5px; font-size: 10.5px; flex: none; }
   .agent-pop .empty { color: var(--muted); font-style: italic; }
   .agent-pop .kv b { font-weight: 600; word-break: break-all; }
+  .agent-pop .model-row { display: flex; gap: 6px; align-items: center; }
+  .agent-pop .model-select { flex: 1; min-width: 0; padding: 6px 8px; font: inherit; color: var(--ink); background: #fff; border: 1px solid var(--border); border-radius: 7px; }
+  .agent-pop .model-refresh { padding: 6px 8px; font: inherit; color: var(--accent); background: var(--accent-soft); border: 1px solid transparent; border-radius: 7px; white-space: nowrap; }
+  .agent-pop .model-refresh:hover:not(:disabled) { border-color: var(--accent); }
+  .agent-pop .model-refresh:disabled, .agent-pop .model-select:disabled { opacity: 0.6; cursor: wait; }
+  .agent-pop .model-note { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+  .agent-pop .model-note.error { color: var(--danger); }
   .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
   /* ---------- 蚂蚁助手（左下角）+ 气泡 + 输入/历史浮窗 ---------- */
   /* 蚂蚁本体：HTML 元素，absolute 定位 + transform 平移；图片本身宽高固定，位置由 JS 写入 */
@@ -1029,6 +1036,9 @@ async function replayCanvas() {
 const agentLauncher = document.getElementById("agentLauncher");
 const agentPop = document.getElementById("agentPop");
 let agentPopOpen = false;
+/** 当前画板的 pi 可用模型；下拉选项只存索引，避免把 provider/model ID 插进 HTML 属性。 */
+let availableAgentModels = [];
+let modelSwitchBusy = false;
 function itemListHtml(items, emptyText) {
   if (!items || !items.length) return `<div class="empty">${escHtml(emptyText)}</div>`;
   return items.map((it) =>
@@ -1047,13 +1057,87 @@ function renderAgentDetail(d) {
     d.thinkingLevel ? ["思考级别", String(d.thinkingLevel)] : null,
     d.sessionName ? ["会话", `${d.sessionName}${d.messageCount != null ? `（${d.messageCount} 条消息）` : ""}`] : null,
   ].filter(Boolean);
+  const modelPicker = d.backend === "pi"
+    ? `<div class="sec"><div class="sec-title">切换模型</div><div class="model-row"><select id="agentModelSelect" class="model-select" disabled><option>加载可用模型…</option></select><button id="agentModelRefresh" class="model-refresh" type="button">刷新</button></div><div class="model-note" id="agentModelNote">切换只影响当前画板后续对话，会保留本画板会话上下文。</div></div>`
+    : `<div class="sec"><div class="sec-title">切换模型</div><div class="model-note">当前 ACP 后端不支持在画布内切换模型。</div></div>`;
   return `<h3>🤖 Agent 信息</h3>` +
     rows.map(([k, v]) => `<div class="item kv"><span class="desc" style="flex:none">${escHtml(k)}</span><b>${escHtml(v)}</b></div>`).join("") +
+    modelPicker +
     `<div class="sec"><div class="sec-title">Extensions</div>${itemListHtml(d.extensions, "未发现扩展")}</div>` +
     `<div class="sec"><div class="sec-title">Skills</div>${itemListHtml(d.skills, "未发现技能")}</div>` +
     `<div class="sec"><div class="sec-title">MCP Servers</div>${itemListHtml(d.mcpServers, "未配置 MCP server")}</div>` +
     (d.selfMcp ? `<div class="desc" style="margin-top:4px">${escHtml(d.selfMcp)}</div>` : "");
 }
+async function loadAgentModels() {
+  const select = document.getElementById("agentModelSelect");
+  const refresh = document.getElementById("agentModelRefresh");
+  const note = document.getElementById("agentModelNote");
+  if (!select || !refresh || !note) return;
+  select.disabled = true;
+  refresh.disabled = true;
+  note.classList.remove("error");
+  note.textContent = "正在读取当前 pi 配置中的可用模型…";
+  try {
+    const res = await fetch("/api/agent/models?board=" + encodeURIComponent(board));
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "读取可用模型失败");
+    availableAgentModels = data.models || [];
+    const current = data.model || {};
+    select.innerHTML = "";
+    availableAgentModels.forEach((model, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `${model.id}${model.provider ? " · " + model.provider : ""}${model.name && model.name !== model.id ? " — " + model.name : ""}`;
+      if (model.id === current.id && model.provider === current.provider) option.selected = true;
+      select.appendChild(option);
+    });
+    if (!availableAgentModels.length) throw new Error("没有可用模型；请先在 pi 中完成对应 provider 的登录或配置");
+    select.disabled = false;
+    note.textContent = "切换只影响当前画板后续对话，会保留本画板会话上下文。";
+  } catch (e) {
+    select.innerHTML = "<option>无法加载模型</option>";
+    note.textContent = e instanceof Error ? e.message : String(e);
+    note.classList.add("error");
+  } finally {
+    refresh.disabled = false;
+  }
+}
+async function switchAgentModel(index) {
+  const model = availableAgentModels[index];
+  const select = document.getElementById("agentModelSelect");
+  const refresh = document.getElementById("agentModelRefresh");
+  const note = document.getElementById("agentModelNote");
+  if (!model || !select || !refresh || !note || modelSwitchBusy) return;
+  modelSwitchBusy = true;
+  select.disabled = true;
+  refresh.disabled = true;
+  note.classList.remove("error");
+  note.textContent = `正在切换到 ${model.id}…`;
+  try {
+    const res = await fetch("/api/agent/models", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ board, provider: model.provider, modelId: model.id }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "切换模型失败");
+    note.textContent = `已切换到 ${data.model?.id || model.id}，后续消息将使用新模型。`;
+  } catch (e) {
+    note.textContent = e instanceof Error ? e.message : String(e);
+    note.classList.add("error");
+  } finally {
+    modelSwitchBusy = false;
+    select.disabled = false;
+    refresh.disabled = false;
+  }
+}
+agentPop.addEventListener("change", (e) => {
+  const target = e.target;
+  if (target instanceof HTMLSelectElement && target.id === "agentModelSelect") void switchAgentModel(Number(target.value));
+});
+agentPop.addEventListener("click", (e) => {
+  const target = e.target;
+  if (target instanceof HTMLButtonElement && target.id === "agentModelRefresh") void loadAgentModels();
+});
 async function toggleAgentPop() {
   agentPopOpen = !agentPopOpen;
   agentPop.hidden = !agentPopOpen;
@@ -1062,7 +1146,10 @@ async function toggleAgentPop() {
   try {
     const res = await fetch("/api/agent/detail?board=" + encodeURIComponent(board));
     const d = await res.json();
-    if (agentPopOpen) agentPop.innerHTML = renderAgentDetail(d);
+    if (agentPopOpen) {
+      agentPop.innerHTML = renderAgentDetail(d);
+      if (d.backend === "pi") void loadAgentModels();
+    }
   } catch {
     if (agentPopOpen) agentPop.innerHTML = `<div class="empty">获取 Agent 信息失败</div>`;
   }

@@ -289,6 +289,31 @@ class PiRpcSession implements AgentSession {
     }
   }
 
+  /** RPC get_available_models：列出当前 pi 配置中可选的模型。 */
+  async getAvailableModels(): Promise<Array<{ id: string; provider: string; name?: string }> | null> {
+    if (!this.alive) return null;
+    try {
+      const data = (await this.command({ type: "get_available_models" }, 15_000)) as {
+        models?: Array<{ id?: string; provider?: string; name?: string }>;
+      };
+      return (data.models ?? [])
+        .filter((model) => typeof model.id === "string" && typeof model.provider === "string")
+        .map((model) => ({ id: model.id!, provider: model.provider!, name: model.name }));
+    } catch {
+      return null;
+    }
+  }
+
+  /** RPC set_model：保留当前画板会话上下文，仅切换后续请求使用的模型。 */
+  async setModel(provider: string, modelId: string): Promise<{ id?: string; provider?: string; name?: string } | null> {
+    if (!this.alive) throw new Error("pi 会话未启动");
+    return (await this.command({ type: "set_model", provider, modelId }, 30_000)) as {
+      id?: string;
+      provider?: string;
+      name?: string;
+    } | null;
+  }
+
   /** RPC get_commands（扩展命令 + skills）；失败返回 null */
   async getCommands(): Promise<
     Array<{ name?: string; description?: string; source?: string; location?: string; path?: string }>
@@ -711,6 +736,49 @@ function makeAgentApi(canvasPortRef: () => number) {
     if (url.pathname === "/api/agent/detail" && req.method === "GET") {
       const board = url.searchParams.get("board") ?? "";
       json(200, { ok: true, ...(await collectAgentDetail(board)) });
+      return true;
+    }
+    // 模型切换只适用于 pi RPC；选择器打开时会预热当前画板的会话，以便读取可用模型。
+    if (url.pathname === "/api/agent/models" && req.method === "GET") {
+      if (BACKEND.kind !== "pi") {
+        json(400, { ok: false, error: "当前 ACP 后端不支持从画布切换模型" });
+        return true;
+      }
+      try {
+        const board = url.searchParams.get("board") ?? "";
+        const session = await ensureAgent(board, canvasPortRef());
+        if (!(session instanceof PiRpcSession)) throw new Error("当前后端不支持模型切换");
+        const models = await session.getAvailableModels();
+        const state = await session.getState();
+        if (!models) throw new Error("读取可用模型失败");
+        json(200, { ok: true, board: boardKey(board), models, model: state?.model ?? null });
+      } catch (e) {
+        json(500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/agent/models" && req.method === "POST") {
+      if (BACKEND.kind !== "pi") {
+        json(400, { ok: false, error: "当前 ACP 后端不支持从画布切换模型" });
+        return true;
+      }
+      if (busy) {
+        json(409, { ok: false, error: "AI 正在处理消息，完成后再切换模型" });
+        return true;
+      }
+      try {
+        const body = await readBody(req);
+        const board = String(body.board ?? "");
+        const provider = String(body.provider ?? "").trim();
+        const modelId = String(body.modelId ?? "").trim();
+        if (!provider || !modelId) throw new Error("缺少 provider 或 modelId");
+        const session = await ensureAgent(board, canvasPortRef());
+        if (!(session instanceof PiRpcSession)) throw new Error("当前后端不支持模型切换");
+        const model = await session.setModel(provider, modelId);
+        json(200, { ok: true, board: boardKey(board), model });
+      } catch (e) {
+        json(400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
       return true;
     }
     if (url.pathname === "/api/chat/history" && req.method === "GET") {

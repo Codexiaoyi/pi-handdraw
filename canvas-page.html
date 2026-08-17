@@ -231,7 +231,7 @@
   }
   /* 所有浮层都从蚂蚁所在位置弹出，避免像从页面顶部掉下来。 */
   #speechBubble.pop-in, #inputPop.pop-in, #historyPop.pop-in {
-    animation: popFromAnt 300ms cubic-bezier(0.18, 0.82, 0.25, 1.18) both;
+    animation: popFromAnt 520ms cubic-bezier(0.18, 0.82, 0.25, 1.18) both;
   }
   @keyframes popFromAnt {
     from { opacity: 0; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(0.12); }
@@ -557,6 +557,81 @@ const controlsEl = document.querySelector(".controls");
 let vb = { x: 0, y: 0, w: 800, h: 500 };
 function applyView() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
 
+// ---------- 摄像机：作画时始终把工蚁保持在镜头中心 ----------
+// 画布坐标是世界坐标；摄像机只负责移动 viewBox 的左上角，缩放仍由用户滚轮控制。
+const camera = (() => {
+  let target = null;
+  let frame = null;
+  let lastTime = 0;
+  const EPSILON = 0.08;
+
+  /**
+   * 输入是工蚁笔尖的世界坐标；换算后让工蚁身体中心（不是笔尖）严格落在屏幕中心。
+   * 蚂蚁是屏幕像素尺寸，因此偏移需要按当前 viewBox 缩放比例换算成世界坐标。
+   */
+  function workerCenteredView(point) {
+    const rect = svg.getBoundingClientRect();
+    const worldPerPxX = vb.w / Math.max(1, rect.width);
+    const worldPerPxY = vb.h / Math.max(1, rect.height);
+    return {
+      x: point.x + (0.5 - ANT_PEN_TIP_RATIO.x) * ANT_SIZE * worldPerPxX - vb.w / 2,
+      y: point.y + (0.5 - ANT_PEN_TIP_RATIO.y) * ANT_SIZE * worldPerPxY - vb.h / 2,
+    };
+  }
+
+  function centerOn(point, immediate = false, elapsed = 16) {
+    const next = workerCenteredView(point);
+    const x = next.x;
+    const y = next.y;
+    if (immediate) {
+      vb.x = x;
+      vb.y = y;
+      applyView();
+      scheduleSaveView();
+      if (typeof syncWorkerScreenPosition === "function") syncWorkerScreenPosition();
+      return;
+    }
+    // 与帧率无关的平滑阻尼：既能跟住快速笔画，也不会瞬移。
+    const easing = 1 - Math.pow(0.001, Math.max(1, elapsed) / 1000);
+    vb.x += (x - vb.x) * easing;
+    vb.y += (y - vb.y) * easing;
+    applyView();
+    scheduleSaveView();
+    if (typeof syncWorkerScreenPosition === "function") syncWorkerScreenPosition();
+  }
+
+  function tick(now) {
+    frame = null;
+    if (!target) return;
+    const elapsed = lastTime ? now - lastTime : 16;
+    lastTime = now;
+    const desired = workerCenteredView(target);
+    const desiredX = desired.x;
+    const desiredY = desired.y;
+    centerOn(target, false, elapsed);
+    if (!target || Math.abs(vb.x - desiredX) > EPSILON || Math.abs(vb.y - desiredY) > EPSILON) {
+      frame = requestAnimationFrame(tick);
+    }
+  }
+
+  return {
+    /** 更新工蚁的世界坐标目标；下一帧开始平滑追随。 */
+    follow(point) {
+      target = { x: point.x, y: point.y };
+      if (!frame) frame = requestAnimationFrame(tick);
+    },
+    /** 停止自动跟随，用户可自由浏览；不会改变当前视角。 */
+    stop() {
+      target = null;
+      lastTime = 0;
+      if (frame) cancelAnimationFrame(frame);
+      frame = null;
+    },
+    /** 供调试或未来 UI 开关查询当前是否正在跟随。 */
+    get following() { return !!target; },
+  };
+})();
+
 // ---------- 视角保存：每个画板记住上次的 viewBox，刷新/重进后恢复 ----------
 function viewKey() { return "handdraw-view:" + board; }
 let viewSaveTimer = null;
@@ -578,6 +653,7 @@ function restoreView() {
   } catch { /* ignore */ }
 }
 function resetView() {
+  camera.stop();
   const r = svg.getBoundingClientRect();
   const W = vb.w, H = vb.h;
   const ratio = r.width / r.height;
@@ -587,7 +663,12 @@ function resetView() {
   applyView();
 }
 let drag = null;
-svg.addEventListener("mousedown", (e) => { drag = { sx: e.clientX, sy: e.clientY, vx: vb.x, vy: vb.y }; svg.style.cursor = "grabbing"; });
+svg.addEventListener("mousedown", (e) => {
+  // 用户主动拖拽时把摄像机交还给用户；下一次工蚁移动会自动重新接管跟随。
+  camera.stop();
+  drag = { sx: e.clientX, sy: e.clientY, vx: vb.x, vy: vb.y };
+  svg.style.cursor = "grabbing";
+});
 // 双击元素 → 弹出说明浮窗
 svg.addEventListener("dblclick", (e) => {
   let g = e.target && e.target.closest ? e.target.closest("g.el") : null;
@@ -637,6 +718,8 @@ function pickElementAt(clientX, clientY) {
 }
 svg.addEventListener("wheel", (e) => {
   e.preventDefault();
+  // 手动缩放是一次明确的浏览意图，暂停自动镜头，直到下一笔移动。
+  camera.stop();
   const r = svg.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const fx = vb.x + (mx * vb.w) / r.width;
@@ -1022,6 +1105,7 @@ async function silentRefresh() {
 /** 处理一批笔画（顺序播放），播放期间淡出底栏避免遮挡 */
 let drawingJobs = 0;
 let shownDescriptionFor = null;
+let streamingObjectDesc = false;
 function beginDrawing() {
   drawingJobs++;
   if (agentMode) setAntStatus("working");
@@ -1029,17 +1113,17 @@ function beginDrawing() {
 function showObjectDescription(s) {
   if (!agentMode || !s.desc || shownDescriptionFor === s.elementId) return;
   shownDescriptionFor = s.elementId;
-  resetAgentTyping();
-  showSpeech(s.desc, { pop: true });
+  streamObjectDescription(s.desc);
 }
 /** 当前队列完成后立即收起对象说明；agent 仍在思考时不会循环展示聊天文本。 */
 function finishDrawingIfIdle() {
   drawingJobs = Math.max(0, drawingJobs - 1);
   if (drawingJobs > 0) return;
   shownDescriptionFor = null;
+  // 不截断仍在逐字输出的 desc；它完成后会自行收起。
+  if (streamingObjectDesc) return;
   hideSpeech();
-  // 笔画完成但 agent 仍在当前回合时，仅隐藏对象气泡；等任务真正结束才回到待机提示。
-  if (!agentWorking && !replaying && agentMode) setAntStatus("idle");
+  if (!replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
 }
 function handleStrokes(strokes) {
   strokeSeq++;
@@ -1223,8 +1307,9 @@ function connect() {
       if (msg.type === "agent") {
         agentWorking = !!msg.working;
         setAgentLight(agentWorking);
-        // agent 仍在当前回合中时保留作画蚂蚁；笔画完成但 agent 尚未结束时气泡隐藏，避免循环输出。
-        setAntStatus(agentWorking || drawingJobs > 0 || replaying ? "working" : "idle");
+        // 收到 agent 开始工作先进入左下角思考态；只有实际笔画队列/回放才切换为镜头跟随的作画态。
+        if (drawingJobs > 0 || replaying || streamingObjectDesc) setAntStatus("working");
+        else setAntStatus(agentWorking ? "thinking" : "idle");
         if (msg.working) sawAgentWorking = true;
         else if (sawAgentWorking) { sawAgentWorking = false; scheduleSilentRefresh(); }
         return;
@@ -1310,7 +1395,7 @@ const historyMsgs = document.getElementById("historyMsgs");
 const historyCount = document.getElementById("historyCount");
 const historyClose = document.getElementById("historyClose");
 
-/** 蚂蚁状态：'idle' 待机 | 'working' 工作中 */
+/** 蚂蚁状态：'idle' 待机 | 'thinking' 思考中 | 'working' 实际作画中 */
 let antStatus = "idle";
 /** agent 是否可用：有 /api/agent/info 才初始化输入 / 历史逻辑 */
 let agentMode = false;
@@ -1321,11 +1406,15 @@ let chatBusy = false;
 /** 蚂蚁当前是击键事件还是双击（<300ms） */
 let antClickT = 0;
 let antClickTimeout = null;
-/** 待机提示的循环打字器。 */
+/** 待机提示打字器。 */
 let idleTypingTimer = null;
 let idleTypingToken = 0;
+/** 思考气泡打字器：持续循环“思考中…”。 */
+let thinkingTypingTimer = null;
+let thinkingTypingToken = 0;
 /** Agent 回复的逐字输出缓冲。后端无论推 delta 还是 full，前端都以稳定节奏显示。 */
 let agentTypingTimer = null;
+let agentHideTimer = null;
 let agentTypingToken = 0;
 let agentTargetText = "";
 let agentVisibleText = "";
@@ -1346,10 +1435,11 @@ const ANT_PEN_TIP_RATIO = { x: 0.802, y: 0.527 };
 function setAntStatus(status, { force = false } = {}) {
   if (!force && antStatus === status) return;
   antStatus = status;
-  // 三个气泡互斥：进入工作态一定关闭输入/历史，仅保留流式回复气泡。
+  // 三个气泡互斥：思考/作画时关闭输入与历史。
   if (status === "working") {
     lastAntTarget = { x: NaN, y: NaN };
     stopIdleTyping();
+    stopThinkingTyping();
     resetAgentTyping();
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
@@ -1358,7 +1448,19 @@ function setAntStatus(status, { force = false } = {}) {
     // 画画蚂蚁是唯一的书写指示器；气泡在实际开始画对象时才显示说明。
     hideSpeech();
     if (penPos) moveAntToPen(penPos.x, penPos.y);
+  } else if (status === "thinking") {
+    stopIdleTyping();
+    resetAgentTyping();
+    closeInputPop({ restoreSpeech: false });
+    closeHistoryPop({ restoreSpeech: false });
+    // 思考的是工蚁：保留工蚁形象，但原地停下，不进入笔画/镜头跟随。
+    antImg.src = ANT_IMG.working;
+    antEl.classList.add("busy", "flip-off");
+    // 停止镜头惯性，避免工蚁静止思考时摄像机仍继续抢视角。
+    camera.stop();
+    startThinkingTyping();
   } else {
+    stopThinkingTyping();
     resetAgentTyping();
     antImg.src = ANT_IMG.idle;
     antEl.classList.remove("busy", "flip-off");
@@ -1399,23 +1501,29 @@ function scheduleBubbleAfterMove() {
 
 /** 待机位置：左下角 */
 function moveAntToCorner() {
+  camera.stop();
   const margin = 20;
   placeAntAt(margin, window.innerHeight - ANT_SIZE - margin);
   scheduleBubbleAfterMove();
 }
 
-/** 工作位置：钢笔笔尖对准蚂蚁右手里握着的笔尖 */
-function moveAntToPen(svgX, svgY) {
-  const screen = svgToScreen(svgX, svgY);
-  // 蚂蚁图的笔尖位于 (ANT_PEN_TIP_RATIO.x * ANT_SIZE, ANT_PEN_TIP_RATIO.y * ANT_SIZE)
-  // => 蚂蚁左上 = 笔尖 - 笔尖偏移
+/** 依据当前 viewBox 把工蚁重新贴到它的世界坐标；摄像机每帧移动时调用。 */
+function syncWorkerScreenPosition() {
+  if (antStatus !== "working" || !penPos) return;
+  const screen = svgToScreen(penPos.x, penPos.y);
+  // 蚂蚁图中笔尖对准当前世界坐标的书写点。
   const left = screen.x - ANT_PEN_TIP_RATIO.x * ANT_SIZE;
   const top = screen.y - ANT_PEN_TIP_RATIO.y * ANT_SIZE;
-  // 不超出屏幕顶部 / 左部
-  const safeLeft = Math.max(-ANT_SIZE * 0.3, left);
-  const safeTop = Math.max(8, top);
-  placeAntAt(safeLeft, safeTop);
+  placeAntAt(left, top);
   scheduleBubbleAfterMove();
+}
+
+/** 工作位置：蚂蚁笔尖对准当前笔画点，同时把该工蚁置于摄像机中心。 */
+function moveAntToPen(svgX, svgY) {
+  // 先保存工蚁的世界坐标。camera 每帧改变 viewBox 后会调用 syncWorkerScreenPosition。
+  penPos = { x: svgX, y: svgY };
+  camera.follow(penPos);
+  syncWorkerScreenPosition();
 }
 
 /** 气泡跟随：放在蚂蚁右上角外侧，尾巴指向蚂蚁中心 */
@@ -1468,16 +1576,87 @@ function stopIdleTyping() {
   if (idleTypingTimer) clearTimeout(idleTypingTimer);
   idleTypingTimer = null;
 }
+function stopThinkingTyping() {
+  thinkingTypingToken++;
+  if (thinkingTypingTimer) clearTimeout(thinkingTypingTimer);
+  thinkingTypingTimer = null;
+}
+/** 思考中：逐字输出一轮，短暂停留后重新开始，直到 agent 结束或开始绘制。 */
+function startThinkingTyping() {
+  stopThinkingTyping();
+  if (!agentMode || antStatus !== "thinking" || !inputPop.hidden || !historyPop.hidden) return;
+  const token = thinkingTypingToken;
+  const fullText = tr("antWorkingEmpty");
+  speechEl.classList.remove("idle", "empty");
+  speechEl.hidden = false;
+  speechBody.textContent = "";
+  requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
+  let index = 0;
+  const typeNext = () => {
+    if (token !== thinkingTypingToken || antStatus !== "thinking") return;
+    speechBody.textContent = fullText.slice(0, ++index);
+    positionBubble();
+    if (index < fullText.length) {
+      thinkingTypingTimer = setTimeout(typeNext, 130);
+    } else {
+      thinkingTypingTimer = setTimeout(startThinkingTyping, 1000);
+    }
+  };
+  thinkingTypingTimer = setTimeout(typeNext, 160);
+}
 function resetAgentTyping() {
   agentTypingToken++;
   if (agentTypingTimer) clearTimeout(agentTypingTimer);
+  if (agentHideTimer) clearTimeout(agentHideTimer);
   agentTypingTimer = null;
+  agentHideTimer = null;
   agentTargetText = "";
   agentVisibleText = "";
+}
+
+/**
+ * 工蚁只流式说当前对象的 desc 元数据。文字写完后若没有新的对象说明，短暂停留再自动收起。
+ * 新对象一到会取消旧的打字/隐藏定时器，并从蚂蚁身边重新弹出。
+ */
+function streamObjectDescription(text) {
+  resetAgentTyping();
+  stopIdleTyping();
+  const token = agentTypingToken;
+  agentTargetText = text;
+  streamingObjectDesc = true;
+  speechEl.classList.remove("idle", "empty");
+  speechEl.hidden = false;
+  speechBody.textContent = "";
+  requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
+
+  const writeNext = () => {
+    if (token !== agentTypingToken || antStatus !== "working") return;
+    if (agentVisibleText.length >= agentTargetText.length) {
+      agentTypingTimer = null;
+      // desc 已无增量：不保留卡住的气泡；留一点阅读时间后自动淡出。
+      agentHideTimer = setTimeout(() => {
+        if (token !== agentTypingToken || agentVisibleText.length < agentTargetText.length) return;
+        streamingObjectDesc = false;
+        hideSpeech();
+        // 若 agent 已结束、笔画也播完，再退出作画姿态；否则保持工蚁待命但不显示气泡。
+        if (drawingJobs === 0 && !replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
+      }, 650);
+      return;
+    }
+    const char = agentTargetText.charAt(agentVisibleText.length);
+    agentVisibleText += char;
+    speechBody.textContent = agentVisibleText;
+    speechBody.scrollTop = speechBody.scrollHeight;
+    positionBubble();
+    // 对象说明采用清晰、可读的逐字节奏；标点处留出更明显的停顿。
+    agentTypingTimer = setTimeout(writeNext, /[。！？.!?，、；：\n]/.test(char) ? 220 : 88);
+  };
+  agentTypingTimer = setTimeout(writeNext, 40);
 }
 /** 待机提示：从蚂蚁身边弹出并逐字播放一次，不循环。 */
 function startIdleTyping() {
   stopIdleTyping();
+  streamingObjectDesc = false;
   if (!agentMode || antStatus !== "idle" || !inputPop.hidden || !historyPop.hidden) return;
   const token = idleTypingToken;
   const fullText = tr("antIdleHint");
@@ -1494,6 +1673,7 @@ function startIdleTyping() {
     if (index < fullText.length) {
       idleTypingTimer = setTimeout(typeNext, fullText[index - 1] === "\n" ? 210 : 92);
     } else {
+      // 等待蚂蚁的入口提示应常驻；仅工蚁作画时的对象说明会在流结束后自动隐藏。
       idleTypingTimer = null;
     }
   };
@@ -1513,6 +1693,8 @@ function showSpeech(text, opts = {}) {
 }
 function hideSpeech() {
   stopIdleTyping();
+  if (agentHideTimer) clearTimeout(agentHideTimer);
+  agentHideTimer = null;
   speechEl.hidden = true;
 }
 function restoreIdleSpeech() {

@@ -660,26 +660,45 @@ export class CanvasServer {
     const freeSpots: CanvasSummary["freeSpots"] = [];
     if (bounds) {
       const pad = 80;
+      const gap = 40;
+      // 行带聚类：y 区间有交叠的元素算同一行（同层级），帮助同级元素对齐排布
+      const bands: Array<{ minY: number; maxY: number; minX: number; maxX: number; count: number }> = [];
+      for (const el of [...b.elements].sort((a, e2) => a.y - e2.y)) {
+        const last = bands[bands.length - 1];
+        if (last && el.y <= last.maxY) {
+          last.minY = Math.min(last.minY, el.y);
+          last.maxY = Math.max(last.maxY, el.y + el.h);
+          last.minX = Math.min(last.minX, el.x);
+          last.maxX = Math.max(last.maxX, el.x + el.w);
+          last.count++;
+        } else {
+          bands.push({ minY: el.y, maxY: el.y + el.h, minX: el.x, maxX: el.x + el.w, count: 1 });
+        }
+      }
+      const lastBand = bands[bands.length - 1];
+      // 同行右侧延伸：与最后一行同级对齐（同级元素接着往右排）
+      freeSpots.push({
+        x: lastBand.maxX + gap,
+        y: lastBand.minY,
+        w: 300,
+        h: lastBand.maxY - lastBand.minY,
+        hint: `最后一行右侧延伸（与该行 ${lastBand.count} 个同级元素对齐，y≈${Math.round(lastBand.minY)}）`,
+      });
+      // 新行起点：对齐内容最左，换行往下排
       freeSpots.push({
         x: bounds.minX,
         y: bounds.maxY + pad,
         w: Math.max(bounds.maxX - bounds.minX, 300),
         h: 80,
-        hint: "内容下方",
+        hint: `新行起点（对齐内容最左 x≈${Math.round(bounds.minX)}）`,
       });
+      // 整体右侧
       freeSpots.push({
         x: bounds.maxX + pad,
         y: bounds.minY,
         w: 300,
         h: Math.max(bounds.maxY - bounds.minY, 200),
-        hint: "内容右侧",
-      });
-      freeSpots.push({
-        x: bounds.minX,
-        y: bounds.maxY + pad * 2.5,
-        w: 300,
-        h: 80,
-        hint: "内容下方偏右",
+        hint: "内容右侧（整体新区块）",
       });
     } else {
       freeSpots.push({ x: 60, y: 80, w: 400, h: 120, hint: "画布左上角（起点）" });

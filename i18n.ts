@@ -28,7 +28,7 @@ const zh: Dict = {
     "严禁覆盖已有内容：新元素与已占用区域发生部分重叠会被直接拒绝（返回冲突清单）。容器包含子元素、底色块垫文字这类完全包含关系不受限制；只有确有意的覆盖才允许传 allowOverlap: true。",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
     "实时画图时：一次只画 1-2 个元素（比如先画一个框，再画它的文字），这样用户可以看着笔一笔一笔画。",
-    "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
+    "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers. Route arrows through empty space and never let them cross through a node/body; when a straight route would hit an object, use a clearly curved path (type:path) or segmented route to go around it.",
     "For a container/module box that holds other elements inside, set textPosition \"top\" so its title sits at the top of the box, and place inner content below y+50. NEVER put a container title in the box center and then draw content over it.",
     "Each heading/label must be exactly ONE text element — never repeat the same text at multiple positions.",
     "After drawing a few elements, check the returned summary to place the next ones without overlap.",
@@ -98,6 +98,19 @@ const zh: Dict = {
   "page.clear": "清空",
   "page.hint": "滚轮缩放 · 拖拽平移 · 实时连接",
   "page.board": "画板",
+  // ---- 蚂蚁助手（左下角）+ 气泡 + 输入 / 历史浮窗 ----
+  "page.antIdleHint": "点我告诉我要画点什么",
+  "page.antWorkingTitle": "蚂蚁正在画",
+  "page.antWorkingEmpty": "思考中…",
+  "page.inputTitle": "告诉蚂蚁要画什么",
+  "page.inputHint": "回车发送 · Shift+回车换行",
+  "page.inputPh": "例如：画一个 Kafka 消息总线的架构图…",
+  "page.inputSend": "发送",
+  "page.inputErrBusy": "上一条还在处理中，请稍等",
+  "page.inputErrNet": "⚠️ 网络错误，请稍后再试",
+  "page.inputErrBad": "⚠️ 请求失败，请稍后再试",
+  "page.historyTitle": "本次会话记录",
+  "page.historyEmpty": "本次会话还没有消息，双击空白处开始记录。",
 };
 
 const en: Dict = {
@@ -114,7 +127,7 @@ const en: Dict = {
     "NEVER cover existing content: a new element partially overlapping any occupied region is rejected outright (you get the collision list). Full containment (child inside a container, a background block under text) is allowed; pass allowOverlap: true only when the overlap is truly intentional.",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
     "When drawing live, draw only 1-2 elements per call (e.g. first a box, then its label) so the user can watch the pen write stroke by stroke.",
-    "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers.",
+    "Connect arrows to box edges: right edge=(x+w, y+h/2), left edge=(x, y+h/2), bottom=(x+w/2, y+h), top=(x+w/2, y). Never point arrows at box centers. Route arrows through empty space and never let them cross through a node/body; when a straight route would hit an object, use a clearly curved path (type:path) or segmented route to go around it.",
     "For a container/module box that holds other elements inside, set textPosition \"top\" so its title sits at the top of the box, and place inner content below y+50. NEVER put a container title in the box center and then draw content over it.",
     "Each heading/label must be exactly ONE text element — never repeat the same text at multiple positions.",
     "After drawing a few elements, check the returned summary to place the next ones without overlap.",
@@ -182,6 +195,19 @@ const en: Dict = {
   "page.clear": "Clear",
   "page.hint": "Scroll to zoom · Drag to pan · Live",
   "page.board": "Board",
+  // ---- 蚂蚁助手（左下角）+ 气泡 + 输入 / 历史浮窗 ----
+  "page.antIdleHint": "Click me and tell me what to draw",
+  "page.antWorkingTitle": "Drawing…",
+  "page.antWorkingEmpty": "Thinking…",
+  "page.inputTitle": "Tell the ant what to draw",
+  "page.inputHint": "Enter to send · Shift+Enter for newline",
+  "page.inputPh": "e.g. draw a Kafka message bus architecture…",
+  "page.inputSend": "Send",
+  "page.inputErrBusy": "The previous one is still processing, please wait",
+  "page.inputErrNet": "⚠️ Network error, please try again later",
+  "page.inputErrBad": "⚠️ Request failed, please try again later",
+  "page.historyTitle": "Session history",
+  "page.historyEmpty": "No messages yet in this session. Double-click empty area to start.",
 };
 
 const DICTS: Record<Lang, Dict> = { zh, en };

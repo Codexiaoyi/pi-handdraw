@@ -65,6 +65,8 @@ export interface StrokeMsg {
   width: number;
   /** 书写时长 ms */
   dur: number;
+  /** 所属对象的说明：作画蚂蚁仅展示这一条元数据，不展示 agent 的聊天文本。 */
+  desc?: string;
   /** 填充色（填充图形） */
   fill?: string;
   /** 是否是 text 元素（字体渲染，淡入） */
@@ -418,6 +420,26 @@ export class CanvasServer {
             }
             return;
           }
+          if (url.pathname.startsWith("/ant/") && req.method === "GET") {
+            // 蚂蚁素材：/ant/<文件>（已做透明处理，从 transparent/ 提供）
+            const fileName = decodeURIComponent(url.pathname.slice("/ant/".length));
+            const okName = /^[A-Za-z0-9._-]+\.(png|jpe?g|gif|webp|svg)$/i.test(fileName) && !fileName.startsWith(".");
+            if (okName) {
+              try {
+                const data = readFileSync(join(__dirname, "assets", "ant", "transparent", fileName));
+                const mime = IMAGE_MIME[fileName.slice(fileName.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
+                res.writeHead(200, { "Content-Type": mime, "Cache-Control": "public, max-age=3600" });
+                res.end(data);
+              } catch {
+                res.writeHead(404);
+                res.end();
+              }
+            } else {
+              res.writeHead(404);
+              res.end();
+            }
+            return;
+          }
           if (url.pathname === "/api/boards" && req.method === "GET") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ active: this.activeBoard, boards: this.listBoards() }));
@@ -629,6 +651,14 @@ export class CanvasServer {
     if (this.agentWorking === working) return;
     this.agentWorking = working;
     const msg = JSON.stringify({ type: "agent", working });
+    for (const [ws] of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(msg);
+    }
+  }
+
+  /** Agent 文本流：广播给所有画板，驱动蚂蚁气泡（增量 delta 由调用方决定节流粒度） */
+  broadcastSpeech(payload: { delta?: string; full?: string; done?: boolean }): void {
+    const msg = JSON.stringify({ type: "speech", ...payload });
     for (const [ws] of this.clients) {
       if (ws.readyState === ws.OPEN) ws.send(msg);
     }

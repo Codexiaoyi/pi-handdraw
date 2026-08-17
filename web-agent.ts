@@ -6,7 +6,7 @@
  * 聊天后端不是内置 LLM，而是桥接到你自己安装的 agent：
  *
  * - pi（默认）：走 pi 自带的 --mode rpc（JSONL 协议），直接复用你已安装的
- *   handdraw pi 扩展，会话持久保存在 boards/.pi-web-session/
+ *   handdraw pi 扩展；每个画板拥有独立会话，持久保存在 boards/<board>/.pi-web-session/
  * - claude code / codex / gemini：走 ACP（Agent Client Protocol，Zed 同款），
  *   通过 session/new 注入 handdraw MCP server
  *
@@ -25,9 +25,9 @@
  *
  * HTTP API：
  *   GET  /api/agent/info    → { ok, backend, configured }
- *   GET  /api/chat/history  → { messages: [{role:"user"|"agent", content}] }
- *   POST /api/chat          → { message, board } → { reply }（串行，忙碌时 409）
- *   POST /api/chat/reset    → 清空聊天记录并重开 agent 会话
+ *   GET  /api/chat/history?board=<board>  → 该画板的会话记录
+ *   POST /api/chat          → { message, board } → 该画板的 session reply（全局串行，忙碌时 409）
+ *   POST /api/chat/reset    → { board }，清空该画板记录并重开其 agent 会话
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { spawn, exec, type ChildProcess } from "node:child_process";
@@ -35,7 +35,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, existsSync } from "node
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BOARDS_DIR, getCanvasServer } from "./canvas-server";
+import { BOARDS_DIR, DEFAULT_BOARD, getCanvasServer } from "./canvas-server";
 import { setAgentWorking } from "./core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +50,7 @@ const SCENARIO_PROMPT =
   "你现在处在一个网页画布聊天场景中：用户通过浏览器页面左侧的聊天框和你对话。" +
   "你可以使用 handdraw_canvas / handdraw_board 工具在手绘风实时画布上边画边讲，绘制过程用户实时可见。" +
   "每条用户消息开头会注明用户正在查看的画板名，画图/改图请把 board 参数设为该画板名。" +
+  "画图时，连接箭头必须从节点边缘出发并尽量走空白区域，绝不能穿过任何节点实体；直线会碰到对象时，优先使用明显的弧线路径（type:path），必要时用折线绕开。" +
   "回复保持简洁口语化；纯聊天不要调用工具。";
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,8 @@ interface AgentSession {
   /** 清空上下文（尽量保进程） */
   reset(): Promise<void>;
   kill(): void;
+  /** 注册文字增量回调；返回注销函数，避免每轮任务叠加旧订阅。 */
+  onTextDelta(cb: (delta: string, full: string) => void): () => void;
 }
 
 type BackendSpec =
@@ -113,11 +116,26 @@ class PiRpcSession implements AgentSession {
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private turnText = "";
   private settledResolve: (() => void) | null = null;
+  private textDeltaCbs: Array<(delta: string, full: string) => void> = [];
 
-  constructor(private canvasPort: number) {}
+  onTextDelta(cb: (delta: string, full: string) => void): () => void {
+    this.textDeltaCbs.push(cb);
+    return () => {
+      const index = this.textDeltaCbs.indexOf(cb);
+      if (index >= 0) this.textDeltaCbs.splice(index, 1);
+    };
+  }
+  private emitTextDelta(delta: string, full: string) {
+    for (const cb of this.textDeltaCbs) {
+      try { cb(delta, full); } catch { /* ignore */ }
+    }
+  }
+
+  constructor(private canvasPort: number, private board: string) {}
 
   async start(): Promise<void> {
-    const sessionDir = join(BOARDS_DIR, ".pi-web-session");
+    // 每个画板一个持久的 pi session，不会在切换画板后携带其他画板上下文。
+    const sessionDir = join(BOARDS_DIR, this.board, ".pi-web-session");
     mkdirSync(sessionDir, { recursive: true });
     const extraArgs = (process.env.HANDDRAW_PI_ARGS ?? "").split(/\s+/).filter(Boolean);
     const proc = spawn(
@@ -186,7 +204,9 @@ class PiRpcSession implements AgentSession {
       return;
     }
     if (msg.type === "message_update" && msg.assistantMessageEvent?.type === "text_delta") {
-      this.turnText += msg.assistantMessageEvent.delta ?? "";
+      const delta = msg.assistantMessageEvent.delta ?? "";
+      this.turnText += delta;
+      this.emitTextDelta(delta, this.turnText);
       return;
     }
     if (msg.type === "agent_settled") {
@@ -317,12 +337,26 @@ class AcpSession implements AgentSession {
   private buf = "";
   private turnText = "";
   private sessionId: string | null = null;
+  private textDeltaCbs: Array<(delta: string, full: string) => void> = [];
 
   constructor(
     private spec: { label: string; cmd: string; args: string[] },
     private canvasPort: number
   ) {
     this.label = spec.label;
+  }
+
+  onTextDelta(cb: (delta: string, full: string) => void): () => void {
+    this.textDeltaCbs.push(cb);
+    return () => {
+      const index = this.textDeltaCbs.indexOf(cb);
+      if (index >= 0) this.textDeltaCbs.splice(index, 1);
+    };
+  }
+  private emitTextDelta(delta: string, full: string) {
+    for (const cb of this.textDeltaCbs) {
+      try { cb(delta, full); } catch { /* ignore */ }
+    }
   }
 
   async start(): Promise<void> {
@@ -410,7 +444,9 @@ class AcpSession implements AgentSession {
     if (msg.method === "session/update") {
       const update = (msg.params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } })?.update;
       if (update?.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
-        this.turnText += update.content.text ?? "";
+        const delta = update.content.text ?? "";
+        this.turnText += delta;
+        this.emitTextDelta(delta, this.turnText);
       }
       return;
     }
@@ -488,41 +524,62 @@ class AcpSession implements AgentSession {
 // ---------------------------------------------------------------------------
 
 const BACKEND = resolveBackend();
-let session: AgentSession | null = null;
-let starting: Promise<AgentSession> | null = null;
+type ChatMessage = { role: "user" | "agent"; content: string };
+type BoardAgentState = {
+  session: AgentSession | null;
+  starting: Promise<AgentSession> | null;
+  history: ChatMessage[];
+};
+const boardAgents = new Map<string, BoardAgentState>();
+// 画布的工作状态和流式气泡当前是全局广播，任务依旧全局串行，避免不同画板的输出互相抢占。
 let busy = false;
 
-const displayHistory: Array<{ role: "user" | "agent"; content: string }> = [];
-
+function boardKey(board: string): string {
+  return board || DEFAULT_BOARD;
+}
+function getBoardAgent(board: string): BoardAgentState {
+  const key = boardKey(board);
+  let state = boardAgents.get(key);
+  if (!state) {
+    state = { session: null, starting: null, history: [] };
+    boardAgents.set(key, state);
+  }
+  return state;
+}
 function isReady(s: AgentSession | null): s is AgentSession {
   return Boolean(s?.alive);
 }
 
-async function ensureAgent(canvasPort: number): Promise<AgentSession> {
-  if (isReady(session)) return session;
-  if (starting) return starting;
-  starting = (async () => {
+async function ensureAgent(board: string, canvasPort: number): Promise<AgentSession> {
+  const key = boardKey(board);
+  const state = getBoardAgent(key);
+  if (isReady(state.session)) return state.session;
+  if (state.starting) return state.starting;
+  state.starting = (async () => {
     const s: AgentSession =
-      BACKEND.kind === "pi" ? new PiRpcSession(canvasPort) : new AcpSession(BACKEND, canvasPort);
+      BACKEND.kind === "pi" ? new PiRpcSession(canvasPort, key) : new AcpSession(BACKEND, canvasPort);
     await s.start();
-    session = s;
-    starting = null;
+    state.session = s;
+    state.starting = null;
     return s;
   })().catch((e) => {
-    starting = null;
+    state.starting = null;
     throw e;
   });
-  return starting;
+  return state.starting;
 }
 
 async function chatWithAgent(message: string, board: string, canvasPort: number): Promise<string> {
-  const agent = await ensureAgent(canvasPort);
-  const context = `[用户正在浏览器里查看画板「${board || "default"}」。]\n\n${message}`;
+  const key = boardKey(board);
+  const agent = await ensureAgent(key, canvasPort);
+  const context = `[用户正在浏览器里查看画板「${key}」。]\n\n${message}`;
   // agent 工作期间（思考+作画）点亮画布呼吸灯
   await setAgentWorking(true);
   try {
     const reply = await agent.prompt(context, PROMPT_TIMEOUT);
     return reply || "（agent 没有文字回复，但它可能已经动手画了）";
+  } catch (e) {
+    throw e;
   } finally {
     await setAgentWorking(false);
   }
@@ -599,8 +656,10 @@ function scanMcpServers(): NameItem[] {
   return out;
 }
 
-async function collectAgentDetail(): Promise<Record<string, unknown>> {
-  const detail: Record<string, unknown> = { backend: BACKEND.label, started: isReady(session) };
+async function collectAgentDetail(board: string): Promise<Record<string, unknown>> {
+  const key = boardKey(board);
+  const session = getBoardAgent(key).session;
+  const detail: Record<string, unknown> = { backend: BACKEND.label, board: key, started: isReady(session) };
   // 运行状态（pi RPC：模型/思考级别/会话/skills）
   if (BACKEND.kind === "pi" && isReady(session) && session instanceof PiRpcSession) {
     const state = await session.getState();
@@ -650,20 +709,27 @@ function makeAgentApi(canvasPortRef: () => number) {
       return true;
     }
     if (url.pathname === "/api/agent/detail" && req.method === "GET") {
-      json(200, { ok: true, ...(await collectAgentDetail()) });
+      const board = url.searchParams.get("board") ?? "";
+      json(200, { ok: true, ...(await collectAgentDetail(board)) });
       return true;
     }
     if (url.pathname === "/api/chat/history" && req.method === "GET") {
-      json(200, { messages: displayHistory.slice(-100) });
+      const board = url.searchParams.get("board") ?? "";
+      const state = getBoardAgent(board);
+      json(200, { board: boardKey(board), messages: state.history.slice(-100) });
       return true;
     }
     if (url.pathname === "/api/chat/reset" && req.method === "POST") {
-      displayHistory.length = 0;
-      if (session) {
-        await session.reset().catch(() => session?.kill());
-        if (!isReady(session)) session = null;
+      let body: Record<string, unknown>;
+      try { body = await readBody(req); } catch { body = {}; }
+      const board = String(body.board ?? "");
+      const state = getBoardAgent(board);
+      state.history.length = 0;
+      if (state.session) {
+        await state.session.reset().catch(() => state.session?.kill());
+        if (!isReady(state.session)) state.session = null;
       }
-      json(200, { ok: true });
+      json(200, { ok: true, board: boardKey(board) });
       return true;
     }
     if (url.pathname === "/api/chat" && req.method === "POST") {
@@ -687,7 +753,7 @@ function makeAgentApi(canvasPortRef: () => number) {
       busy = true;
       try {
         const reply = await chatWithAgent(message, board, canvasPortRef());
-        displayHistory.push({ role: "user", content: message }, { role: "agent", content: reply });
+        getBoardAgent(board).history.push({ role: "user", content: message }, { role: "agent", content: reply });
         json(200, { reply });
       } catch (e) {
         json(500, { error: e instanceof Error ? e.message : String(e) });
@@ -723,7 +789,7 @@ async function main() {
 }
 
 function shutdown() {
-  session?.kill();
+  for (const state of boardAgents.values()) state.session?.kill();
   getCanvasServer().stop();
   process.exit(0);
 }

@@ -139,20 +139,7 @@
   .nb-pop input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   .nb-pop .ok { background: var(--accent); color: #fff; }
   .nb-pop .ok:hover { background: #4338ca; }
-  /* ---------- Web Agent 聊天面板（左侧悬浮卡片，可推拉） ---------- */
-  .chat-launcher {
-    position: fixed; left: 16px; top: 50%; transform: translateY(-50%);
-    width: 44px; height: 44px; border-radius: 50%; padding: 0;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--island);
-    backdrop-filter: blur(14px) saturate(1.4);
-    -webkit-backdrop-filter: blur(14px) saturate(1.4);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow); font-size: 18px; z-index: 11;
-  }
-  .chat-launcher:hover { background: #fff; }
-  .chat-launcher svg { width: 20px; height: 20px; }
-  /* ---------- 右上角 agent 信息按钮 + 浮窗 ---------- */
+  /* ---------- 右上角 Agent 信息 ---------- */
   .agent-launcher {
     position: fixed; right: 16px; top: 16px;
     width: 44px; height: 44px; border-radius: 50%; padding: 0;
@@ -160,8 +147,7 @@
     background: var(--island);
     backdrop-filter: blur(14px) saturate(1.4);
     -webkit-backdrop-filter: blur(14px) saturate(1.4);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow); z-index: 11;
+    border: 1px solid var(--border); box-shadow: var(--shadow); z-index: 11;
   }
   .agent-launcher:hover { background: #fff; }
   .agent-launcher svg { width: 20px; height: 20px; }
@@ -173,73 +159,185 @@
     -webkit-backdrop-filter: blur(16px) saturate(1.4);
     border: 1px solid var(--border); border-radius: 16px;
     box-shadow: 0 2px 4px rgba(16, 24, 40, 0.05), 0 16px 48px rgba(16, 24, 40, 0.16);
-    z-index: 12; padding: 14px 16px; font-size: 12.5px; color: var(--ink);
+    z-index: 14; padding: 14px 16px; font-size: 12.5px; color: var(--ink);
   }
   .agent-pop h3 { margin: 0 0 6px; font-size: 13px; }
   .agent-pop .sec { margin-top: 12px; }
-  .agent-pop .sec-title {
-    color: var(--muted); font-size: 10.5px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;
-  }
+  .agent-pop .sec-title { color: var(--muted); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
   .agent-pop .item { display: flex; gap: 6px; align-items: baseline; padding: 2px 0; line-height: 1.45; }
   .agent-pop .item .desc { color: var(--muted); flex: 1; min-width: 0; }
-  .agent-pop .tag {
-    color: var(--accent); background: var(--accent-soft);
-    border-radius: 4px; padding: 0 5px; font-size: 10.5px; flex: none;
-  }
+  .agent-pop .tag { color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 0 5px; font-size: 10.5px; flex: none; }
   .agent-pop .empty { color: var(--muted); font-style: italic; }
   .agent-pop .kv b { font-weight: 600; word-break: break-all; }
   .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
-  .chat-title svg { width: 15px; height: 15px; color: var(--accent); }
-  .chat-panel {
-    position: fixed; left: 16px; top: 72px; bottom: 86px;
-    width: 340px; max-width: calc(100vw - 80px);
+  /* ---------- 蚂蚁助手（左下角）+ 气泡 + 输入/历史浮窗 ---------- */
+  /* 蚂蚁本体：HTML 元素，absolute 定位 + transform 平移；图片本身宽高固定，位置由 JS 写入 */
+  #ant {
+    position: fixed; left: 0; top: 0;
+    width: 66px; height: 66px;
+    z-index: 11;
+    cursor: pointer;
+    pointer-events: auto;
+    user-select: none;
+    transition: transform 0.18s ease;
+    will-change: transform;
+    /* 落点在画布上时不要画自己的阴影，方便看清笔画 */
+    filter: drop-shadow(0 4px 8px rgba(40, 30, 20, 0.22));
+  }
+  #ant.dragging { cursor: grabbing; }
+  /* 工作时以极短线性过渡追随笔迹：消除瞬移，同时不明显落后于笔尖。 */
+  #ant.busy { cursor: default; transition: transform 90ms linear; animation: antBreathe 2.4s ease-in-out infinite; }
+  /* 输入浮窗打开时，蚂蚁不能点击；三个浮层的入口保持互斥。 */
+  body.input-open #ant { pointer-events: none; cursor: default; }
+  /* 工作状态时给蚂蚁加个轻呼吸阴影脉动（不要改 transform，避免覆盖 inline translate） */
+  @keyframes antBreathe {
+    0%, 100% { filter: drop-shadow(0 6px 14px rgba(40, 30, 20, 0.18)); }
+    50%      { filter: drop-shadow(0 10px 22px rgba(40, 30, 20, 0.32)); }
+  }
+  #ant img {
+    width: 100%; height: 100%;
+    display: block;
+    /* 默认朝右（待机的正面思考图，朝向屏幕右边，画在右侧）；背面图朝向左边 */
+    transform: scaleX(-1);
+    transition: transform 0.25s ease;
+    pointer-events: none;
+  }
+  /* 背面握笔图（工作状态）原始朝向是右边带笔尖，所以去掉翻转 */
+  #ant.flip-off img { transform: none; }
+  /* ---------- 气泡：始终跟随蚂蚁右上角 ---------- */
+  #speechBubble {
+    position: fixed; left: 0; top: 0;
+    z-index: 12;
+    /* 气泡随逐字输出自然长大；到达屏幕安全宽度后再换行增高。 */
+    width: fit-content;
+    min-width: 64px;
+    max-width: min(280px, calc(100vw - 16px));
+    max-height: 28vh;
+    overflow: hidden;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 6px 22px rgba(16, 24, 40, 0.12), 0 2px 4px rgba(16, 24, 40, 0.05);
+    font-size: 12.5px; line-height: 1.5; color: var(--ink);
+    /* 容器不保留模板缩进换行；仅正文保留 agent 输出中的换行。 */
+    white-space: normal; word-break: break-word;
+    transform: translate(var(--pop-x, 0px), var(--pop-y, 0px));
+    transform-origin: var(--pop-origin-x, 50%) var(--pop-origin-y, 100%);
+    transition: opacity 0.18s ease;
+    pointer-events: none;
+  }
+  /* 所有浮层都从蚂蚁所在位置弹出，避免像从页面顶部掉下来。 */
+  #speechBubble.pop-in, #inputPop.pop-in, #historyPop.pop-in {
+    animation: popFromAnt 300ms cubic-bezier(0.18, 0.82, 0.25, 1.18) both;
+  }
+  @keyframes popFromAnt {
+    from { opacity: 0; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(0.12); }
+    to { opacity: 1; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(1); }
+  }
+  #speechBubble .b-body {
+    max-height: 30vh; overflow-y: auto; white-space: pre-wrap;
+  }
+  #speechBubble.empty .b-body { color: var(--muted); font-style: italic; }
+  #speechBubble.idle .b-body { color: var(--ink); }
+  #speechBubble.busy .b-body { color: var(--ink); }
+  #speechBubble .b-tail {
+    position: absolute;
+    bottom: -8px;
+    width: 14px; height: 14px;
+    background: rgba(255, 255, 255, 0.95);
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    transform: rotate(45deg);
+  }
+  /* 气泡在蚂蚁下方时，尾巴翻到顶部，仍准确指向蚂蚁。 */
+  #speechBubble .b-tail.tail-top {
+    top: -8px; bottom: auto;
+    border-right: 0; border-bottom: 0;
+    border-left: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+  }
+  /* ---------- 输入浮窗（点击蚂蚁弹出） ---------- */
+  #inputPop {
+    position: fixed; left: 0; top: 0;
+    z-index: 13;
+    width: 320px; max-width: calc(100vw - 32px);
+    background: var(--island);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: 0 6px 22px rgba(16, 24, 40, 0.12), 0 2px 4px rgba(16, 24, 40, 0.05);
+    padding: 12px 12px 10px;
+    transform: translate(var(--pop-x, 0px), var(--pop-y, 0px));
+    transform-origin: var(--pop-origin-x, 50%) var(--pop-origin-y, 100%);
+    transition: opacity 0.18s ease;
+  }
+  #inputPop .head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+  }
+  #inputPop .head .h-title { font-size: 13px; font-weight: 600; }
+  #inputPop .head .h-hint { color: var(--muted); font-size: 11px; margin-left: 4px; }
+  #inputPop .head .h-close { margin-left: auto; padding: 2px 8px; font-size: 13px; }
+  #inputPop textarea {
+    width: 100%; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px; font: inherit; font-size: 13px; background: #fff;
+    min-height: 64px; max-height: 160px; line-height: 1.45;
+  }
+  #inputPop textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #inputPop .row {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 8px;
+  }
+  #inputPop .row .err { color: var(--danger); font-size: 12px; flex: 1; }
+  #inputPop .row .send-btn {
+    background: var(--accent); color: #fff; border-radius: 10px;
+    padding: 6px 14px; font-size: 13px;
+  }
+  #inputPop .row .send-btn:hover { background: #4338ca; }
+  #inputPop .row .send-btn:disabled { opacity: 0.5; cursor: default; }
+  /* ---------- 历史浮窗（双击蚂蚁弹出） ---------- */
+  #historyPop {
+    position: fixed; left: 0; top: 0;
+    z-index: 13;
+    width: 340px; max-width: calc(100vw - 32px);
+    max-height: 60vh;
     display: flex; flex-direction: column;
     background: var(--island);
     backdrop-filter: blur(16px) saturate(1.4);
     -webkit-backdrop-filter: blur(16px) saturate(1.4);
     border: 1px solid var(--border); border-radius: 16px;
-    box-shadow: 0 2px 4px rgba(16, 24, 40, 0.05), 0 16px 48px rgba(16, 24, 40, 0.16);
-    z-index: 11; overflow: hidden;
-    transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+    box-shadow: 0 6px 22px rgba(16, 24, 40, 0.12), 0 2px 4px rgba(16, 24, 40, 0.05);
+    transform: translate(var(--pop-x, 0px), var(--pop-y, 0px));
+    transform-origin: var(--pop-origin-x, 50%) var(--pop-origin-y, 100%);
+    transition: opacity 0.18s ease;
   }
-  .chat-panel.closed { transform: translateX(calc(-100% - 32px)); }
-  .chat-head {
+  #historyPop .head {
     display: flex; align-items: center; gap: 8px;
-    padding: 12px 12px 10px; border-bottom: 1px solid var(--border);
+    padding: 12px 14px 10px; border-bottom: 1px solid var(--border);
   }
-  .chat-title { font-weight: 600; font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 6px; }
-  .chat-model {
-    margin-left: auto; font-size: 11px; color: var(--muted);
-    background: rgba(16, 24, 40, 0.05); padding: 2px 8px; border-radius: 6px;
-    max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .chat-head button { padding: 2px 8px; font-size: 13px; }
-  .chat-msgs {
+  #historyPop .head .h-title { font-weight: 600; font-size: 13px; }
+  #historyPop .head .h-count { color: var(--muted); font-size: 11px; margin-left: 4px; }
+  #historyPop .head .h-close { margin-left: auto; padding: 2px 8px; font-size: 13px; }
+  #historyPop .msgs {
     flex: 1; overflow-y: auto; padding: 12px;
     display: flex; flex-direction: column; gap: 8px;
   }
-  .msg {
-    max-width: 85%; padding: 8px 12px; border-radius: 12px;
-    font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  #historyPop .msg {
+    max-width: 88%; padding: 7px 11px; border-radius: 12px;
+    font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
   }
-  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
-  .msg.agent { align-self: flex-start; background: rgba(16, 24, 40, 0.05); color: var(--ink); border-bottom-left-radius: 4px; }
-  .msg.thinking { display: flex; gap: 4px; align-items: center; padding: 12px 14px; }
-  .msg.thinking i { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; animation: blink 1.2s infinite; }
-  .msg.thinking i:nth-child(2) { animation-delay: 0.2s; }
-  .msg.thinking i:nth-child(3) { animation-delay: 0.4s; }
-  @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
-  .chat-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
-  .chat-input textarea {
-    flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px;
-    padding: 8px 10px; font: inherit; font-size: 13px; background: #fff;
-    min-height: 36px; max-height: 96px; line-height: 1.4;
+  #historyPop .msg.user {
+    align-self: flex-end; background: var(--accent); color: #fff;
+    border-bottom-right-radius: 4px;
   }
-  .chat-input textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .chat-input button { background: var(--accent); color: #fff; border-radius: 10px; padding: 0 14px; }
-  .chat-input button:hover { background: #4338ca; }
-  .chat-input button:disabled { opacity: 0.5; cursor: default; }
+  #historyPop .msg.agent {
+    align-self: flex-start; background: rgba(16, 24, 40, 0.06); color: var(--ink);
+    border-bottom-left-radius: 4px;
+  }
+  #historyPop .empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 12px; }
   /* ---------- 元素选中：蚂蚁线高亮框 + 操作条 ---------- */
   .sel-rect {
     fill: rgba(79, 70, 229, 0.07); stroke: var(--accent);
@@ -316,8 +414,6 @@
   }
   .sel-chip .sel-id { color: var(--muted); }
   #selDelete:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
-  /* 钢笔指示器（变换由 JS 每帧写入，禁掉 CSS 过渡避免滞后抖动；仅透明度用过渡做淡出） */
-  #pen { pointer-events: none; filter: drop-shadow(1px 2px 2px rgba(60,40,20,0.35)); transition: opacity 0.45s ease; }
 </style>
 </head>
 <body>
@@ -325,38 +421,6 @@
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
     <g id="content"></g>
     <g id="overlay" pointer-events="none"></g>
-    <!--
-      钢笔：笔尖在 (0,0)，笔身沿 -y 方向；JS 里 translate 到笔画点 + 固定倾角。
-      结构：金色笔尖（含中缝和呼吸孔）→ 握位 → 笔杆（酒红渐变 + 高光）→ 笔顶圆珠
-    -->
-    <g id="pen" opacity="0">
-      <g id="penInner">
-        <defs>
-          <linearGradient id="barrelGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stop-color="#8e2f23"/>
-            <stop offset="0.45" stop-color="#c0392b"/>
-            <stop offset="1" stop-color="#6e241b"/>
-          </linearGradient>
-          <linearGradient id="nibGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stop-color="#c9a227"/>
-            <stop offset="0.5" stop-color="#f4d03f"/>
-            <stop offset="1" stop-color="#b8912a"/>
-          </linearGradient>
-        </defs>
-        <!-- 笔杆 -->
-        <rect x="-4" y="-46" width="8" height="26" rx="3.5" fill="url(#barrelGrad)"/>
-        <rect x="-2.6" y="-44" width="1.6" height="22" rx="0.8" fill="#e8b0a5" opacity="0.55"/>
-        <!-- 笔顶装饰环 + 圆珠 -->
-        <rect x="-4.4" y="-49" width="8.8" height="3.4" rx="1.7" fill="#d4ac0d"/>
-        <circle cx="0" cy="-51.5" r="2.6" fill="#7b241c"/>
-        <!-- 握位 -->
-        <path d="M -3.4 -20 L 3.4 -20 L 2.6 -13 L -2.6 -13 Z" fill="#2c3e50"/>
-        <!-- 笔尖（铱金粒 → 尖） -->
-        <path d="M -2.6 -13 L 2.6 -13 L 1.1 -2 L 0 0 L -1.1 -2 Z" fill="url(#nibGrad)"/>
-        <line x1="0" y1="-12" x2="0" y2="-1.6" stroke="#7d6608" stroke-width="0.7"/>
-        <circle cx="0" cy="-8.5" r="0.9" fill="#7d6608"/>
-      </g>
-    </g>
   </svg>
   <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="agent-pulse" id="agentPulse" hidden><i></i><i></i><i></i><span class="agent-label">AI 思考 / 作画中…</span></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
   <div id="breath"></div>
@@ -379,20 +443,38 @@
     <button id="selDelete">删除</button>
     <button id="selClose">✕</button>
   </div>
-  <button class="chat-launcher" id="chatLauncher" title="聊天" hidden><svg class="icon" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></button>
-  <button class="agent-launcher" id="agentLauncher" title="agent 信息" onclick="toggleAgentPop()"><svg class="icon" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></svg></button>
+  <button class="agent-launcher" id="agentLauncher" title="Agent 信息" aria-label="Agent 信息"><svg class="icon" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></svg></button>
   <div class="agent-pop" id="agentPop" hidden></div>
-  <div class="chat-panel closed" id="chatPanel" hidden>
-    <div class="chat-head">
-      <span class="chat-title"><svg class="icon" viewBox="0 0 24 24"><path d="M15.7 21.3a1 1 0 0 1-1.4 0l-1.6-1.6a1 1 0 0 1 0-1.4l5.6-5.6a1 1 0 0 1 1.4 0l1.6 1.6a1 1 0 0 1 0 1.4z"/><path d="m18 13-1.4-6.9a1 1 0 0 0-.7-.8L3.2 2a1 1 0 0 0-1.2 1.2l3.3 12.7a1 1 0 0 0 .8.7L13 18"/><path d="m2.3 2.3 7.3 7.3"/><circle cx="11" cy="11" r="2"/></svg><span>画布小助手</span></span>
-      <span class="chat-model" id="chatModel"></span>
-      <button id="chatClose" title="收起">«</button>
+  <!-- 蚂蚁助手（左下角待机 / 工作状态切换） -->
+  <div id="ant" aria-label="蚂蚁助手" hidden>
+    <img id="antImg" alt="ant" draggable="false" src="/ant/ant-front-thinking.png">
+  </div>
+  <!-- 气泡：始终跟随蚂蚁右上角，待机显示提示，工作显示 agent 回复 -->
+  <div id="speechBubble" class="empty idle" aria-live="polite" hidden>
+    <div class="b-tail"></div>
+    <div class="b-body"></div>
+  </div>
+  <!-- 输入浮窗（点击蚂蚁弹出） -->
+  <div id="inputPop" hidden>
+    <div class="head">
+      <span class="h-title">告诉蚂蚁要画什么</span>
+      <span class="h-hint">回车发送 · Shift+回车换行</span>
+      <button class="h-close" id="inputClose" title="关闭">✕</button>
     </div>
-    <div class="chat-msgs" id="chatMsgs"></div>
-    <div class="chat-input">
-      <textarea id="chatText" rows="1" placeholder="让 AI 画点什么…"></textarea>
-      <button id="chatSend">发送</button>
+    <textarea id="inputText" rows="3" placeholder="例如：画一个 Kafka 消息总线的架构图…"></textarea>
+    <div class="row">
+      <span class="err" id="inputErr"></span>
+      <button class="send-btn" id="inputSend">发送</button>
     </div>
+  </div>
+  <!-- 历史浮窗（双击蚂蚁弹出） -->
+  <div id="historyPop" hidden>
+    <div class="head">
+      <span class="h-title">本次会话记录</span>
+      <span class="h-count" id="historyCount"></span>
+      <button class="h-close" id="historyClose" title="关闭">✕</button>
+    </div>
+    <div class="msgs" id="historyMsgs"></div>
   </div>
 </div>
 <script>
@@ -405,7 +487,20 @@ const I18N = {
   clearConfirm: "确定清空当前画板？所有笔画都会被删除。",
   hint: "滚轮缩放 · 拖拽平移 · 实时连接", board: "画板",
   newBoard: "新建画板", nbPh: "新画板名", create: "创建",
-  chatPh: "让 AI 画点什么…", send: "发送",
+  // 蚂蚁 + 气泡 + 输入 / 历史 浮窗
+  antIdleHint: "点我告诉我要画点什么",
+  antWorkingTitle: "蚂蚁正在画",
+  antWorkingEmpty: "思考中…",
+  inputTitle: "告诉蚂蚁要画什么",
+  inputHint: "回车发送 · Shift+回车换行",
+  inputPh: "例如：画一个 Kafka 消息总线的架构图…",
+  inputSend: "发送",
+  inputErrBusy: "上一条还在处理中，请稍等",
+  inputErrNet: "⚠️ 网络错误，请稍后再试",
+  inputErrBad: "⚠️ 请求失败，请稍后再试",
+  historyTitle: "本次会话记录",
+  historyEmpty: "本次会话还没有消息，双击空白处开始记录。",
+  // agent 未配置 / 错误
   noCfg: "未配置模型 API Key：请设置 HANDDRAW_LLM_API_KEY 后重启 agent。",
   netErr: "⚠️ 网络错误，请稍后再试",
 };
@@ -423,8 +518,8 @@ document.getElementById("hint").textContent = tr("hint");
 document.getElementById("btnNewBoard").title = tr("newBoard");
 document.getElementById("nbName").placeholder = tr("nbPh");
 document.getElementById("nbOk").textContent = tr("create");
-document.getElementById("chatText").placeholder = tr("chatPh");
-document.getElementById("chatSend").textContent = tr("send");
+document.getElementById("inputText").placeholder = tr("inputPh");
+document.getElementById("inputSend").textContent = tr("inputSend");
 
 // ---------- 画板 ----------
 let board = new URLSearchParams(location.search).get("board") || "";
@@ -455,8 +550,6 @@ function switchBoard(name) {
 // ---------- 无限画布 ----------
 const svg = document.getElementById("canvas");
 const content = document.getElementById("content");
-const pen = document.getElementById("pen");
-const penInner = document.getElementById("penInner");
 const labelEl = document.getElementById("curLabel");
 const progEl = document.getElementById("progress");
 const wsDot = document.getElementById("wsDot");
@@ -582,33 +675,58 @@ let totalStrokes = 0;
 let queue = Promise.resolve();
 let wipeSeq = 0;
 
-/** 固定握笔倾角：真实书写时笔的角度基本不变，随路径切线旋转会剧烈抖动。右倾 30° */
-const PEN_ANGLE = 30;
 /** 笔尖当前位置（画布坐标），用于笔画间的抬笔滑行 */
 let penPos = null;
+/** 蚂蚁位置节流：上一帧蚂蚁所在坐标，与 penPos 比较，变化>4 才重写 transform（避免每帧写入） */
+let lastAntTarget = { x: NaN, y: NaN };
 
 function movePen(x, y) {
   penPos = { x, y };
-  penInner.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${PEN_ANGLE})`);
+  // 工作状态下蚂蚁跟随笔尖：节流调用以避免每帧 reflow
+  if (antStatus === "working" && agentMode) {
+    if (!Number.isFinite(lastAntTarget.x) || !Number.isFinite(lastAntTarget.y) ||
+        Math.abs(x - lastAntTarget.x) > 4 || Math.abs(y - lastAntTarget.y) > 4) {
+      lastAntTarget = { x, y };
+      moveAntToPen(x, y);
+    }
+  }
 }
-function showPen() { pen.setAttribute("opacity", "1"); }
-function hidePen() { pen.setAttribute("opacity", "0"); }
 
-/** 抬笔滑行：从当前位置平滑移到下一笔起点（easeOutCubic，按距离定时长） */
+/** 工作态中等蚂蚁的 CSS 跟随过渡结束，确保它先落到笔画起点再下笔。 */
+function waitForAntArrival(to) {
+  if (antStatus !== "working" || !agentMode) return Promise.resolve();
+  // 最后一帧强制写入精确落点，留出一次短暂落笔缓冲即可。
+  lastAntTarget = { x: to.x, y: to.y };
+  moveAntToPen(to.x, to.y);
+  return new Promise((resolve) => setTimeout(resolve, 80));
+}
+
+/** 抬笔滑行：从当前位置平滑移到下一笔起点；工作态必须等蚂蚁抵达后才开始画。 */
 function glidePen(to) {
   const from = penPos;
-  if (!from) { movePen(to.x, to.y); return Promise.resolve(); }
+  if (!from) {
+    movePen(to.x, to.y);
+    return waitForAntArrival(to);
+  }
   const dist = Math.hypot(to.x - from.x, to.y - from.y);
-  if (dist < 24) { movePen(to.x, to.y); return Promise.resolve(); }
-  const dur = Math.min(280, 70 + dist * 0.3);
-  showPen();
+  if (dist < 24) {
+    movePen(to.x, to.y);
+    return waitForAntArrival(to);
+  }
+  // 画画蚂蚁的抬笔移动稍慢一点，给用户清晰的“移动 → 落笔”节奏。
+  const dur = Math.min(300, 75 + dist * 0.30);
   const startT = performance.now();
   return new Promise((resolve) => {
     function frame(now) {
       const t = Math.min(1, (now - startT) / dur);
       const e = 1 - Math.pow(1 - t, 3);
       movePen(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e);
-      if (t < 1) requestAnimationFrame(frame); else resolve();
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        // 先准确落位，再等待蚂蚁完成最后一小段追随。
+        waitForAntArrival(to).then(resolve);
+      }
     }
     requestAnimationFrame(frame);
   });
@@ -640,12 +758,12 @@ async function playStroke(s) {
     group.appendChild(clip);
     g.setAttribute("clip-path", `url(#${clipId})`);
 
-    const wipeDur = Math.max(200, dur);
+    const wipeDur = Math.max(80, dur);
     const startX = bb.x - pad;
     const full = bb.width + pad * 2;
     const penY = bb.y + bb.height * 0.72; // 笔尖贴在基线附近
+    // 等蚂蚁抵达文字起点后，才开始揭开文字。
     await glidePen({ x: startX, y: penY });
-    showPen();
     const startT = performance.now();
     return new Promise((resolve) => {
       function frame(now) {
@@ -676,21 +794,25 @@ async function playStroke(s) {
     const hlen = p.getTotalLength();
     p.style.strokeDasharray = hlen;
     p.style.strokeDashoffset = hlen;
-    p.style.transition = `stroke-dashoffset ${dur}ms ease-out`;
-    hidePen();
+    // 填充斜线没有逐段笔尖轨迹，也仍需等蚂蚁先抵达该组笔画的起点。
+    await glidePen(p.getPointAtLength(0));
+    const hatchDur = Math.max(80, dur);
+    p.style.transition = `stroke-dashoffset ${hatchDur}ms ease-out`;
     requestAnimationFrame(() => { p.style.strokeDashoffset = "0"; });
-    return new Promise(r => setTimeout(r, dur));
+    return new Promise(r => setTimeout(r, hatchDur));
   }
   if (s.fill) {
     // 填充图形（箭头尖）：淡入
     p.setAttribute("fill", s.fill);
     p.setAttribute("stroke", "none");
     p.style.opacity = "0";
-    p.style.transition = `opacity ${dur}ms`;
     group.appendChild(p);
+    // 箭头尖等填充元素也遵守“先到位、后落笔”的节奏。
+    if (p.getTotalLength() > 0) await glidePen(p.getPointAtLength(0));
+    const fillDur = Math.max(80, dur);
+    p.style.transition = `opacity ${fillDur}ms`;
     requestAnimationFrame(() => { p.style.opacity = "1"; });
-    hidePen();
-    return new Promise(r => setTimeout(r, dur));
+    return new Promise(r => setTimeout(r, fillDur));
   }
   p.setAttribute("fill", "none");
   p.setAttribute("stroke", s.color);
@@ -701,16 +823,17 @@ async function playStroke(s) {
   // dash 生长动画
   p.style.strokeDasharray = len;
   p.style.strokeDashoffset = len;
-  p.style.transition = `stroke-dashoffset ${dur}ms linear`;
 
-  // 先抬笔滑行到本笔起点，再落笔书写
+  // 先抬笔滑行到本笔起点并等蚂蚁落笔，再启动真实笔画的出现动画。
   await glidePen(p.getPointAtLength(0));
-  showPen();
+  const drawDur = Math.max(80, dur);
+  p.style.transition = `stroke-dashoffset ${drawDur}ms linear`;
+  requestAnimationFrame(() => { p.style.strokeDashoffset = "0"; });
 
   const startT = performance.now();
   return new Promise((resolve) => {
     function frame(now) {
-      const t = Math.min(1, (now - startT) / dur);
+      const t = Math.min(1, (now - startT) / drawDur);
       const pt = p.getPointAtLength(len * t);
       movePen(pt.x, pt.y);
       if (t < 1) {
@@ -768,7 +891,6 @@ function renderInstant(strokes) {
   totalStrokes = 0;
   for (const s of strokes) drawStrokeInstant(s);
   progEl.textContent = totalStrokes + tr("strokeUnit");
-  hidePen();
   penPos = null;
 }
 
@@ -785,6 +907,7 @@ async function replayCanvas() {
     strokes = data.strokes;
   } catch { return; }
   replaying = true;
+  beginDrawing();
   strokeSeq++; // 让进行中的静默刷新失效，避免把回放冲掉
   deselect();
   content.innerHTML = "";
@@ -796,55 +919,52 @@ async function replayCanvas() {
     controlsEl.classList.add("dim");
     try {
       for (const s of strokes) {
+        showObjectDescription(s);
         if (s.image) { drawStrokeInstant(s); continue; } // 图片直接出现
         totalStrokes++;
         progEl.textContent = totalStrokes + tr("strokeUnit");
         labelEl.textContent = "▶ " + (s.label || tr("replaying"));
+        showObjectDescription(s);
         await playStroke(s);
       }
       labelEl.textContent = tr("replayDone");
-      hidePen();
       penPos = null;
     } finally {
       controlsEl.classList.remove("dim");
       replaying = false;
+      finishDrawingIfIdle();
     }
   });
 }
 
-// ---------- agent 信息浮窗（右上角图标） ----------
+// ---------- Agent 信息浮窗（右上角） ----------
 const agentLauncher = document.getElementById("agentLauncher");
 const agentPop = document.getElementById("agentPop");
 let agentPopOpen = false;
 function itemListHtml(items, emptyText) {
   if (!items || !items.length) return `<div class="empty">${escHtml(emptyText)}</div>`;
-  return items
-    .map(
-      (it) =>
-        `<div class="item"><span>${escHtml(it.name ?? it)}</span>` +
-        (it.location ? `<span class="tag">${escHtml(it.location)}</span>` : "") +
-        (it.description ? `<span class="desc">${escHtml(it.description)}</span>` : "") +
-        `</div>`
-    )
-    .join("");
+  return items.map((it) =>
+    `<div class="item"><span>${escHtml(it.name ?? it)}</span>` +
+    (it.location ? `<span class="tag">${escHtml(it.location)}</span>` : "") +
+    (it.description ? `<span class="desc">${escHtml(it.description)}</span>` : "") +
+    `</div>`
+  ).join("");
 }
 function renderAgentDetail(d) {
   const m = d.model || {};
   const rows = [
+    ["画板", String(d.board ?? (board || "default"))],
     ["后端", String(d.backend ?? "?") + (d.started ? "" : "（未启动，发第一条消息后可见模型信息）")],
     m.id ? ["模型", `${m.id}${m.provider ? " · " + m.provider : ""}`] : null,
     d.thinkingLevel ? ["思考级别", String(d.thinkingLevel)] : null,
     d.sessionName ? ["会话", `${d.sessionName}${d.messageCount != null ? `（${d.messageCount} 条消息）` : ""}`] : null,
   ].filter(Boolean);
-  return (
-    `<h3>🤖 Agent 信息</h3>` +
+  return `<h3>🤖 Agent 信息</h3>` +
     rows.map(([k, v]) => `<div class="item kv"><span class="desc" style="flex:none">${escHtml(k)}</span><b>${escHtml(v)}</b></div>`).join("") +
     `<div class="sec"><div class="sec-title">Extensions</div>${itemListHtml(d.extensions, "未发现扩展")}</div>` +
     `<div class="sec"><div class="sec-title">Skills</div>${itemListHtml(d.skills, "未发现技能")}</div>` +
-    `<div class="sec"><div class="sec-title">MCP Servers</div>${itemListHtml(d.mcpServers, "未配置 MCP server")}` +
-    (d.selfMcp ? `<div class="desc" style="margin-top:4px">${escHtml(d.selfMcp)}</div>` : "") +
-    `</div>`
-  );
+    `<div class="sec"><div class="sec-title">MCP Servers</div>${itemListHtml(d.mcpServers, "未配置 MCP server")}</div>` +
+    (d.selfMcp ? `<div class="desc" style="margin-top:4px">${escHtml(d.selfMcp)}</div>` : "");
 }
 async function toggleAgentPop() {
   agentPopOpen = !agentPopOpen;
@@ -852,16 +972,16 @@ async function toggleAgentPop() {
   if (!agentPopOpen) return;
   agentPop.innerHTML = `<div class="empty">加载中…</div>`;
   try {
-    const res = await fetch("/api/agent/detail");
+    const res = await fetch("/api/agent/detail?board=" + encodeURIComponent(board));
     const d = await res.json();
     if (agentPopOpen) agentPop.innerHTML = renderAgentDetail(d);
   } catch {
-    if (agentPopOpen) agentPop.innerHTML = `<div class="empty">获取 agent 信息失败</div>`;
+    if (agentPopOpen) agentPop.innerHTML = `<div class="empty">获取 Agent 信息失败</div>`;
   }
 }
+agentLauncher.addEventListener("click", (e) => { e.stopPropagation(); toggleAgentPop(); });
 document.addEventListener("click", (e) => {
-  if (!agentPopOpen) return;
-  if (agentPop.contains(e.target) || agentLauncher.contains(e.target)) return;
+  if (!agentPopOpen || agentPop.contains(e.target) || agentLauncher.contains(e.target)) return;
   agentPopOpen = false;
   agentPop.hidden = true;
 });
@@ -894,29 +1014,55 @@ async function silentRefresh() {
     content.innerHTML = "";
     while (tmp.firstChild) content.appendChild(tmp.firstChild);
     progEl.textContent = totalStrokes + tr("strokeUnit");
-    hidePen();
     penPos = null;
     elMetaCache = null;
   } catch { /* 静默刷新失败不影响使用 */ }
 }
 
 /** 处理一批笔画（顺序播放），播放期间淡出底栏避免遮挡 */
+let drawingJobs = 0;
+let shownDescriptionFor = null;
+function beginDrawing() {
+  drawingJobs++;
+  if (agentMode) setAntStatus("working");
+}
+function showObjectDescription(s) {
+  if (!agentMode || !s.desc || shownDescriptionFor === s.elementId) return;
+  shownDescriptionFor = s.elementId;
+  resetAgentTyping();
+  showSpeech(s.desc, { pop: true });
+}
+/** 当前队列完成后立即收起对象说明；agent 仍在思考时不会循环展示聊天文本。 */
+function finishDrawingIfIdle() {
+  drawingJobs = Math.max(0, drawingJobs - 1);
+  if (drawingJobs > 0) return;
+  shownDescriptionFor = null;
+  hideSpeech();
+  // 笔画完成但 agent 仍在当前回合时，仅隐藏对象气泡；等任务真正结束才回到待机提示。
+  if (!agentWorking && !replaying && agentMode) setAntStatus("idle");
+}
 function handleStrokes(strokes) {
   strokeSeq++;
+  beginDrawing();
   queue = queue.then(async () => {
     controlsEl.classList.add("dim");
     try {
       for (const s of strokes) {
-        if (s.image) { drawStrokeInstant(s); continue; } // 图片直接出现，不走钢笔动画
+        if (s.image) {
+          showObjectDescription(s);
+          drawStrokeInstant(s);
+          continue;
+        }
         totalStrokes++;
         progEl.textContent = totalStrokes + tr("strokeUnit");
         labelEl.textContent = "✏️ " + (s.label || "绘制");
+        showObjectDescription(s);
         await playStroke(s);
       }
       labelEl.textContent = tr("batchDone");
-      hidePen(); // 本批画完，抬笔淡出（CSS opacity 过渡）
     } finally {
       controlsEl.classList.remove("dim");
+      finishDrawingIfIdle();
     }
   });
 }
@@ -926,7 +1072,6 @@ function clearCanvas() {
   content.innerHTML = "";
   totalStrokes = 0;
   penPos = null;
-  hidePen();
   deselect();
   progEl.textContent = "0" + tr("strokeUnit");
   labelEl.textContent = tr("cleared");
@@ -1050,15 +1195,8 @@ document.getElementById("selDelete").addEventListener("click", async () => {
 });
 document.getElementById("selQuote").addEventListener("click", () => {
   if (!selectedId) return;
-  // agent 模式：把选中元素 ID 带进聊天输入框；否则复制到剪贴板
-  if (!chatLauncher.hidden || !chatPanel.hidden) {
-    openChat();
-    chatText.value = `元素 ${selectedId}：`;
-    autoGrow();
-    chatText.focus();
-  } else {
-    navigator.clipboard?.writeText(selectedId);
-  }
+  // 打开输入浮窗，把选中元素 ID 带进去引用
+  openInputPop(`元素 ${selectedId}：`);
 });
 
 // ---------- WebSocket 实时接收 ----------
@@ -1083,9 +1221,16 @@ function connect() {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.type === "agent") {
-        setAgentLight(!!msg.working);
+        agentWorking = !!msg.working;
+        setAgentLight(agentWorking);
+        // agent 仍在当前回合中时保留作画蚂蚁；笔画完成但 agent 尚未结束时气泡隐藏，避免循环输出。
+        setAntStatus(agentWorking || drawingJobs > 0 || replaying ? "working" : "idle");
         if (msg.working) sawAgentWorking = true;
         else if (sawAgentWorking) { sawAgentWorking = false; scheduleSilentRefresh(); }
+        return;
+      }
+      if (msg.type === "speech") {
+        // 蚂蚁不显示 agent 的聊天/思考输出，只在实际画对象时展示该对象 desc 元数据。
         return;
       }
       elMetaCache = null; // 画布有变动，元素元数据缓存失效
@@ -1149,99 +1294,410 @@ async function createBoardFromPop() {
 }
 nbName.addEventListener("keydown", (e) => { if (e.key === "Enter") createBoardFromPop(); });
 
-// ---------- Web Agent 聊天面板 ----------
-const chatLauncher = document.getElementById("chatLauncher");
-const chatPanel = document.getElementById("chatPanel");
-const chatMsgs = document.getElementById("chatMsgs");
-const chatText = document.getElementById("chatText");
-const chatSend = document.getElementById("chatSend");
-let chatBusy = false;
-let historyLoaded = false;
+// ---------- 蚂蚁助手（待机 / 工作两态） ----------
+const antEl = document.getElementById("ant");
+const antImg = document.getElementById("antImg");
+const speechEl = document.getElementById("speechBubble");
+const speechBody = speechEl.querySelector(".b-body");
+const speechTail = speechEl.querySelector(".b-tail");
+const inputPop = document.getElementById("inputPop");
+const inputText = document.getElementById("inputText");
+const inputSend = document.getElementById("inputSend");
+const inputErr = document.getElementById("inputErr");
+const inputClose = document.getElementById("inputClose");
+const historyPop = document.getElementById("historyPop");
+const historyMsgs = document.getElementById("historyMsgs");
+const historyCount = document.getElementById("historyCount");
+const historyClose = document.getElementById("historyClose");
 
-/** 探测是否为 web-agent 模式（服务器挂了 /api/agent/info 才显示聊天入口） */
-async function initAgent() {
-  try {
-    const res = await fetch("/api/agent/info");
-    if (!res.ok) return;
-    const info = await res.json();
-    if (!info.ok) return;
-    chatLauncher.hidden = false;
-    document.getElementById("chatModel").textContent = info.model || "";
-    if (!info.configured) addMsg("agent", "⚠️ " + tr("noCfg"));
-  } catch { /* 非 agent 模式，保持隐藏 */ }
+/** 蚂蚁状态：'idle' 待机 | 'working' 工作中 */
+let antStatus = "idle";
+/** agent 是否可用：有 /api/agent/info 才初始化输入 / 历史逻辑 */
+let agentMode = false;
+/** 最近一次从 WebSocket 收到的 agent 工作状态（避免页面初始化时覆盖忙碌状态）。 */
+let agentWorking = false;
+/** 发送聊天消息防重入 */
+let chatBusy = false;
+/** 蚂蚁当前是击键事件还是双击（<300ms） */
+let antClickT = 0;
+let antClickTimeout = null;
+/** 待机提示的循环打字器。 */
+let idleTypingTimer = null;
+let idleTypingToken = 0;
+/** Agent 回复的逐字输出缓冲。后端无论推 delta 还是 full，前端都以稳定节奏显示。 */
+let agentTypingTimer = null;
+let agentTypingToken = 0;
+let agentTargetText = "";
+let agentVisibleText = "";
+/** 蚁图片路径：待机 vs 工作（transparent 目录下的两张透明 PNG） */
+const ANT_IMG = {
+  idle: "/ant/ant-front-thinking.png",
+  working: "/ant/ant-back-with-pen.png",
+};
+
+/** 蚂蚁的 CSS 尺寸（与 #ant 的 width/height 一致） */
+const ANT_SIZE = 66;
+/** back-with-pen 图：蚂蚁中心与笔尖在画布坐标里的偏移比（参考 transparent 图的源像素估计）
+ *  source 图 1024x1024，蚂蚁中心约 (440, 480)，笔尖约 (820, 540)
+ *  -> 笔尖相对中心 = (+380, +60) / 1024 ≈ (+0.371, +0.059)
+ *  工作状态时让笔尖对准钢笔笔尖位置 */
+const ANT_PEN_TIP_RATIO = { x: 0.802, y: 0.527 };
+
+function setAntStatus(status, { force = false } = {}) {
+  if (!force && antStatus === status) return;
+  antStatus = status;
+  // 三个气泡互斥：进入工作态一定关闭输入/历史，仅保留流式回复气泡。
+  if (status === "working") {
+    lastAntTarget = { x: NaN, y: NaN };
+    stopIdleTyping();
+    resetAgentTyping();
+    closeInputPop({ restoreSpeech: false });
+    closeHistoryPop({ restoreSpeech: false });
+    antImg.src = ANT_IMG.working;
+    antEl.classList.add("busy", "flip-off");
+    // 画画蚂蚁是唯一的书写指示器；气泡在实际开始画对象时才显示说明。
+    hideSpeech();
+    if (penPos) moveAntToPen(penPos.x, penPos.y);
+  } else {
+    resetAgentTyping();
+    antImg.src = ANT_IMG.idle;
+    antEl.classList.remove("busy", "flip-off");
+    moveAntToCorner();
+    // 回合结束后回到待机提示；提示只弹出、逐字播放一次，不循环。
+    startIdleTyping();
+  }
 }
-function openChat() {
-  chatPanel.hidden = false;
-  chatLauncher.hidden = true;
-  requestAnimationFrame(() => chatPanel.classList.remove("closed"));
-  if (!historyLoaded) { historyLoaded = true; loadHistory(); }
-  chatText.focus();
+
+/** SVG 画布坐标 -> 屏幕坐标（考虑 viewBox 变换） */
+function svgToScreen(svgX, svgY) {
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const pt = new DOMPoint(svgX, svgY).matrixTransform(ctm);
+  return { x: pt.x, y: pt.y };
 }
-function closeChat() {
-  chatPanel.classList.add("closed");
-  chatLauncher.hidden = false;
-  setTimeout(() => { if (chatPanel.classList.contains("closed")) chatPanel.hidden = true; }, 380);
+
+/** 设置蚂蚁的 transform（以 CSS 变量 --ant-x / --ant-y 写入，使呼吸动画能用） */
+function placeAntAt(left, top) {
+  antEl.style.setProperty("--ant-x", left.toFixed(1) + "px");
+  antEl.style.setProperty("--ant-y", top.toFixed(1) + "px");
+  antEl.style.transform = `translate(${left}px, ${top}px)`;
 }
-async function loadHistory() {
-  try {
-    const res = await fetch("/api/chat/history");
-    const data = await res.json();
-    for (const m of data.messages ?? []) addMsg(m.role === "user" ? "user" : "agent", m.content);
-  } catch { /* ignore */ }
+
+/** 蚂蚁移动/过渡期间每帧同步气泡位置，确保气泡始终贴着蚂蚁而非停在上一个落点。 */
+let pendingBubbleFrame = null;
+let bubbleFollowUntil = 0;
+function scheduleBubbleAfterMove() {
+  bubbleFollowUntil = performance.now() + 120; // 覆盖 #ant 工作态 90ms 的 transform transition
+  if (pendingBubbleFrame) return;
+  const follow = () => {
+    positionBubble();
+    if (performance.now() < bubbleFollowUntil) pendingBubbleFrame = requestAnimationFrame(follow);
+    else pendingBubbleFrame = null;
+  };
+  pendingBubbleFrame = requestAnimationFrame(follow);
 }
-function addMsg(role, text) {
-  const div = document.createElement("div");
-  div.className = "msg " + role;
-  div.textContent = text;
-  chatMsgs.appendChild(div);
-  chatMsgs.scrollTop = chatMsgs.scrollHeight;
-  return div;
+
+/** 待机位置：左下角 */
+function moveAntToCorner() {
+  const margin = 20;
+  placeAntAt(margin, window.innerHeight - ANT_SIZE - margin);
+  scheduleBubbleAfterMove();
 }
-function addThinking() {
-  const div = document.createElement("div");
-  div.className = "msg agent thinking";
-  div.innerHTML = "<i></i><i></i><i></i>";
-  chatMsgs.appendChild(div);
-  chatMsgs.scrollTop = chatMsgs.scrollHeight;
-  return div;
+
+/** 工作位置：钢笔笔尖对准蚂蚁右手里握着的笔尖 */
+function moveAntToPen(svgX, svgY) {
+  const screen = svgToScreen(svgX, svgY);
+  // 蚂蚁图的笔尖位于 (ANT_PEN_TIP_RATIO.x * ANT_SIZE, ANT_PEN_TIP_RATIO.y * ANT_SIZE)
+  // => 蚂蚁左上 = 笔尖 - 笔尖偏移
+  const left = screen.x - ANT_PEN_TIP_RATIO.x * ANT_SIZE;
+  const top = screen.y - ANT_PEN_TIP_RATIO.y * ANT_SIZE;
+  // 不超出屏幕顶部 / 左部
+  const safeLeft = Math.max(-ANT_SIZE * 0.3, left);
+  const safeTop = Math.max(8, top);
+  placeAntAt(safeLeft, safeTop);
+  scheduleBubbleAfterMove();
 }
-function autoGrow() {
-  chatText.style.height = "auto";
-  chatText.style.height = Math.min(chatText.scrollHeight, 96) + "px";
+
+/** 气泡跟随：放在蚂蚁右上角外侧，尾巴指向蚂蚁中心 */
+function positionBubble() {
+  const rect = antEl.getBoundingClientRect();
+  const bubbleW = speechEl.offsetWidth;
+  const bubbleH = speechEl.offsetHeight;
+  const gap = 10; // 气泡与蚂蚁的间距
+  // 默认：气泡在蚂蚁右上方（左下角贴蚂蚁右上角内侧一点）
+  // right 边跟蚂蚁的 right 对齐；bottom 边在蚂蚁 top 上方 gap 距离
+  let left = rect.right - bubbleW;
+  let top = rect.top - bubbleH - gap;
+  // 超左边：贴蚂蚁左边右偏
+  if (left < 8) left = 8;
+  // 超右边：贴右
+  if (left + bubbleW > window.innerWidth - 8) left = window.innerWidth - bubbleW - 8;
+  // 超上边：放到蚂蚁下面
+  if (top < 8) {
+    top = rect.bottom + gap;
+    speechTail.classList.add("tail-top");
+  } else {
+    speechTail.classList.remove("tail-top");
+  }
+  // 气泡的缩放原点精确落在蚂蚁中心，弹出时视觉上就是从蚂蚁而来。
+  const targetX = rect.left + rect.width / 2;
+  const targetY = rect.top + rect.height / 2;
+  setPopPosition(speechEl, left, top, targetX, targetY);
+  // 尾巴指向蚂蚁中心（气泡底部）
+  const tailX = targetX - left - 7; // 7 = 尾巴宽一半
+  speechTail.style.left = Math.max(0, Math.min(tailX, bubbleW - 14)) + "px";
+  speechTail.style.right = "auto";
 }
-async function sendChat() {
-  const text = chatText.value.trim();
-  if (!text || chatBusy) return;
-  addMsg("user", text);
-  chatText.value = "";
-  autoGrow();
+
+/** 给浮层设置位置及从蚂蚁来的缩放原点。 */
+function setPopPosition(el, left, top, sourceX, sourceY) {
+  el.style.setProperty("--pop-x", `${left}px`);
+  el.style.setProperty("--pop-y", `${top}px`);
+  // 原点允许在卡片边界之外：例如输入框在蚂蚁右边时，缩放原点仍是蚂蚁本身。
+  el.style.setProperty("--pop-origin-x", `${sourceX - left}px`);
+  el.style.setProperty("--pop-origin-y", `${sourceY - top}px`);
+}
+function popFromAnt(el) {
+  el.classList.remove("pop-in");
+  void el.offsetWidth; // 重启动画
+  el.classList.add("pop-in");
+  el.addEventListener("animationend", () => el.classList.remove("pop-in"), { once: true });
+}
+function stopIdleTyping() {
+  idleTypingToken++;
+  if (idleTypingTimer) clearTimeout(idleTypingTimer);
+  idleTypingTimer = null;
+}
+function resetAgentTyping() {
+  agentTypingToken++;
+  if (agentTypingTimer) clearTimeout(agentTypingTimer);
+  agentTypingTimer = null;
+  agentTargetText = "";
+  agentVisibleText = "";
+}
+/** 待机提示：从蚂蚁身边弹出并逐字播放一次，不循环。 */
+function startIdleTyping() {
+  stopIdleTyping();
+  if (!agentMode || antStatus !== "idle" || !inputPop.hidden || !historyPop.hidden) return;
+  const token = idleTypingToken;
+  const fullText = tr("antIdleHint");
+  speechEl.classList.add("idle");
+  speechEl.classList.remove("empty");
+  speechEl.hidden = false;
+  speechBody.textContent = "";
+  requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
+  let index = 0;
+  const typeNext = () => {
+    if (token !== idleTypingToken || antStatus !== "idle" || !inputPop.hidden || !historyPop.hidden) return;
+    speechBody.textContent = fullText.slice(0, ++index);
+    positionBubble();
+    if (index < fullText.length) {
+      idleTypingTimer = setTimeout(typeNext, fullText[index - 1] === "\n" ? 210 : 92);
+    } else {
+      idleTypingTimer = null;
+    }
+  };
+  idleTypingTimer = setTimeout(typeNext, 180);
+}
+/** 立即设置气泡文本：仅用于“思考中”等状态文案。 */
+function showSpeech(text, opts = {}) {
+  stopIdleTyping();
+  speechBody.textContent = text;
+  speechEl.classList.remove("idle");
+  speechEl.classList.toggle("empty", !text);
+  speechEl.hidden = false;
+  requestAnimationFrame(() => {
+    positionBubble();
+    if (opts.pop) popFromAnt(speechEl);
+  });
+}
+function hideSpeech() {
+  stopIdleTyping();
+  speechEl.hidden = true;
+}
+function restoreIdleSpeech() {
+  if (agentMode && antStatus === "idle" && inputPop.hidden && historyPop.hidden) startIdleTyping();
+}
+
+/** 点击蚂蚁 -> 输入浮窗；双击 -> 历史浮窗 */
+antEl.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!agentMode || antStatus === "working") return;
+  // 双击的第一击会先以 click 出现在这里， 二次击才会出双击事件。 以 280ms 延迟区分：
+  if (antClickTimeout) { clearTimeout(antClickTimeout); antClickTimeout = null; }
+  antClickT = Date.now();
+  antClickTimeout = setTimeout(() => {
+    antClickTimeout = null;
+    openInputPop();
+  }, 260);
+});
+antEl.addEventListener("dblclick", (e) => {
+  e.stopPropagation();
+  if (!agentMode || antStatus === "working") return;
+  if (antClickTimeout) { clearTimeout(antClickTimeout); antClickTimeout = null; }
+  openHistoryPop();
+});
+antEl.addEventListener("mousedown", (e) => e.stopPropagation()); // 不被画布选中处理吃掉
+
+// ---------- 输入浮窗 ----------
+function positionInputPop() {
+  const rect = antEl.getBoundingClientRect();
+  const popW = inputPop.offsetWidth;
+  const popH = inputPop.offsetHeight;
+  // 默认在蚂蚁右上方
+  let left = rect.right + 12;
+  let top = rect.top - 12;
+  if (left + popW > window.innerWidth - 8) left = rect.left - popW - 12;
+  if (left < 8) left = 8;
+  if (top + popH > window.innerHeight - 8) top = window.innerHeight - popH - 8;
+  if (top < 8) top = 8;
+  setPopPosition(inputPop, left, top, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+function openInputPop(prefill) {
+  if (!agentMode || antStatus === "working") return;
+  // 输入、历史和提示气泡互斥。
+  closeHistoryPop({ restoreSpeech: false });
+  hideSpeech();
+  inputPop.hidden = false;
+  document.body.classList.add("input-open"); // CSS：蚂蚁不能点击
+  inputErr.textContent = "";
+  if (typeof prefill === "string") inputText.value = prefill;
+  else inputText.value = "";
+  requestAnimationFrame(() => {
+    positionInputPop();
+    popFromAnt(inputPop);
+    inputText.focus();
+  });
+}
+function closeInputPop({ restoreSpeech = true } = {}) {
+  inputPop.hidden = true;
+  document.body.classList.remove("input-open");
+  if (restoreSpeech) restoreIdleSpeech();
+}
+async function submitInput() {
+  const text = inputText.value.trim();
+  if (!text) return;
+  if (chatBusy) { inputErr.textContent = tr("inputErrBusy"); return; }
+  inputErr.textContent = "";
   chatBusy = true;
-  chatSend.disabled = true;
-  const thinking = addThinking();
+  inputSend.disabled = true;
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, board }),
     });
-    const data = await res.json().catch(() => ({}));
-    thinking.remove();
-    addMsg("agent", res.ok ? (data.reply || "…") : "⚠️ " + (data.error || ("HTTP " + res.status)));
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      inputErr.textContent = "⚠️ " + (err.error || ("HTTP " + res.status));
+      return;
+    }
+    // 提交成功：清空输入文本，保留输入浮窗打开（用户主动关）
+    // 不调用 closeInputPop()，让用户继续编辑下一条或主动关
+    inputText.value = "";
+    // 提交后由 ws 收到 {type:"agent","working":true} 切换到工作状态
+    // 提交后由 ws 收到 {type:"agent",working:true} 切换到工作状态
   } catch {
-    thinking.remove();
-    addMsg("agent", tr("netErr"));
+    inputErr.textContent = tr("inputErrNet");
+  } finally {
+    chatBusy = false;
+    inputSend.disabled = false;
   }
-  chatBusy = false;
-  chatSend.disabled = false;
-  chatText.focus();
 }
-chatLauncher.addEventListener("click", openChat);
-document.getElementById("chatClose").addEventListener("click", closeChat);
-chatSend.addEventListener("click", sendChat);
-chatText.addEventListener("input", autoGrow);
-chatText.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
+inputSend.addEventListener("click", submitInput);
+inputClose.addEventListener("click", closeInputPop);
+inputText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitInput(); }
 });
+
+// ---------- 历史浮窗 ----------
+function positionHistoryPop() {
+  const rect = antEl.getBoundingClientRect();
+  const popW = historyPop.offsetWidth;
+  const popH = historyPop.offsetHeight;
+  // 默认在蚂蚁左侧
+  let left = rect.left - popW - 16;
+  let top = rect.top - 16;
+  if (left < 8) left = rect.right + 16;
+  if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
+  if (top + popH > window.innerHeight - 8) top = window.innerHeight - popH - 8;
+  if (top < 8) top = 8;
+  setPopPosition(historyPop, left, top, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+async function openHistoryPop() {
+  if (!agentMode || antStatus === "working") return;
+  // 输入、历史和提示气泡互斥。
+  closeInputPop({ restoreSpeech: false });
+  hideSpeech();
+  historyPop.hidden = false;
+  historyMsgs.innerHTML = '<div class="empty">' + tr("historyEmpty") + "</div>";
+  historyCount.textContent = "";
+  requestAnimationFrame(() => {
+    positionHistoryPop();
+    popFromAnt(historyPop);
+  });
+  try {
+    const res = await fetch("/api/chat/history?board=" + encodeURIComponent(board));
+    const data = await res.json();
+    const msgs = data.messages ?? [];
+    historyMsgs.innerHTML = "";
+    if (!msgs.length) {
+      historyMsgs.innerHTML = '<div class="empty">' + tr("historyEmpty") + "</div>";
+    } else {
+      for (const m of msgs) {
+        const div = document.createElement("div");
+        div.className = "msg " + (m.role === "user" ? "user" : "agent");
+        div.textContent = m.content;
+        historyMsgs.appendChild(div);
+      }
+      historyMsgs.scrollTop = historyMsgs.scrollHeight;
+    }
+    historyCount.textContent = msgs.length ? `· ${msgs.length} 条` : "";
+    requestAnimationFrame(positionHistoryPop);
+  } catch {
+    historyMsgs.innerHTML = '<div class="empty">⚠️ ' + tr("netErr") + "</div>";
+  }
+}
+function closeHistoryPop({ restoreSpeech = true } = {}) {
+  historyPop.hidden = true;
+  if (restoreSpeech) restoreIdleSpeech();
+}
+historyClose.addEventListener("click", closeHistoryPop);
+
+// 点击空白处关闭浮窗
+document.addEventListener("mousedown", (e) => {
+  if (!inputPop.hidden && !inputPop.contains(e.target) && !antEl.contains(e.target)) {
+    // 不关闭：如果点击是画布上的双击元素逻辑
+  }
+  if (!historyPop.hidden && !historyPop.contains(e.target) && !antEl.contains(e.target)) {
+    closeHistoryPop();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!inputPop.hidden) closeInputPop();
+    else if (!historyPop.hidden) closeHistoryPop();
+  }
+});
+
+// ---------- agent 模式探测 ----------
+async function initAgent() {
+  try {
+    const res = await fetch("/api/agent/info");
+    if (!res.ok) return;
+    const info = await res.json();
+    if (!info.ok) return;
+    agentMode = true;
+    antEl.hidden = false;
+    // 初始状态由 WebSocket 同步；force 让初值也完成一次定位和渲染。
+    setAntStatus("idle", { force: true });
+    // 窗口缩放时重新摆位置
+    window.addEventListener("resize", () => {
+      if (antStatus === "working" && penPos) moveAntToPen(penPos.x, penPos.y);
+      else moveAntToCorner();
+    });
+  } catch { /* 非 agent 模式，蚂蚁隐藏 */ }
+}
 initAgent();
 initBoard();
 </script>

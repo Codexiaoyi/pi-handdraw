@@ -172,7 +172,7 @@
   .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
   /* ---------- 蚂蚁助手（左下角）+ 气泡 + 输入/历史浮窗 ---------- */
   /* 蚂蚁本体：HTML 元素，absolute 定位 + transform 平移；图片本身宽高固定，位置由 JS 写入 */
-  #ant {
+  #ant, #worker {
     position: fixed; left: 0; top: 0;
     width: 66px; height: 66px;
     z-index: 11;
@@ -184,17 +184,19 @@
     /* 落点在画布上时不要画自己的阴影，方便看清笔画 */
     filter: drop-shadow(0 4px 8px rgba(40, 30, 20, 0.22));
   }
+  /* 工蚁始终显示在右下角或当前笔画处，不接受交互。 */
+  #worker { cursor: default; pointer-events: none; }
   #ant.dragging { cursor: grabbing; }
-  /* 工作时以极短线性过渡追随笔迹：消除瞬移，同时不明显落后于笔尖。 */
-  #ant.busy { cursor: default; transition: transform 90ms linear; animation: antBreathe 2.4s ease-in-out infinite; }
-  /* 输入浮窗打开时，蚂蚁不能点击；三个浮层的入口保持互斥。 */
+  /* 工蚁作画时以极短线性过渡追随笔迹：消除瞬移，同时不明显落后于笔尖。 */
+  #worker.busy { cursor: default; transition: transform 90ms linear; animation: antBreathe 2.4s ease-in-out infinite; }
+  /* 输入浮窗打开时，蚁后不能点击；三个浮层的入口保持互斥。 */
   body.input-open #ant { pointer-events: none; cursor: default; }
   /* 工作状态时给蚂蚁加个轻呼吸阴影脉动（不要改 transform，避免覆盖 inline translate） */
   @keyframes antBreathe {
     0%, 100% { filter: drop-shadow(0 6px 14px rgba(40, 30, 20, 0.18)); }
     50%      { filter: drop-shadow(0 10px 22px rgba(40, 30, 20, 0.32)); }
   }
-  #ant img {
+  #ant img, #worker img {
     width: 100%; height: 100%;
     display: block;
     /* 默认朝右（待机的正面思考图，朝向屏幕右边，画在右侧）；背面图朝向左边 */
@@ -203,9 +205,10 @@
     pointer-events: none;
   }
   /* 背面握笔图（工作状态）原始朝向是右边带笔尖，所以去掉翻转 */
-  #ant.flip-off img { transform: none; }
+  /* 工蚁始终保持握笔图原始朝向；蚁后才使用镜像朝向。 */
+  #worker img, #worker.flip-off img { transform: none; }
   /* ---------- 气泡：始终跟随蚂蚁右上角 ---------- */
-  #speechBubble {
+  #queenSpeech, #workerSpeech {
     position: fixed; left: 0; top: 0;
     z-index: 12;
     /* 气泡随逐字输出自然长大；到达屏幕安全宽度后再换行增高。 */
@@ -230,20 +233,20 @@
     pointer-events: none;
   }
   /* 所有浮层都从蚂蚁所在位置弹出，避免像从页面顶部掉下来。 */
-  #speechBubble.pop-in, #inputPop.pop-in, #historyPop.pop-in {
+  #queenSpeech.pop-in, #workerSpeech.pop-in, #inputPop.pop-in, #historyPop.pop-in {
     animation: popFromAnt 520ms cubic-bezier(0.18, 0.82, 0.25, 1.18) both;
   }
   @keyframes popFromAnt {
     from { opacity: 0; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(0.12); }
     to { opacity: 1; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(1); }
   }
-  #speechBubble .b-body {
+  #queenSpeech .b-body, #workerSpeech .b-body {
     max-height: 30vh; overflow-y: auto; white-space: pre-wrap;
   }
-  #speechBubble.empty .b-body { color: var(--muted); font-style: italic; }
-  #speechBubble.idle .b-body { color: var(--ink); }
-  #speechBubble.busy .b-body { color: var(--ink); }
-  #speechBubble .b-tail {
+  #queenSpeech.empty .b-body, #workerSpeech.empty .b-body { color: var(--muted); font-style: italic; }
+  #queenSpeech.idle .b-body, #workerSpeech.idle .b-body { color: var(--ink); }
+  #queenSpeech.busy .b-body, #workerSpeech.busy .b-body { color: var(--ink); }
+  #queenSpeech .b-tail, #workerSpeech .b-tail {
     position: absolute;
     bottom: -8px;
     width: 14px; height: 14px;
@@ -253,7 +256,7 @@
     transform: rotate(45deg);
   }
   /* 气泡在蚂蚁下方时，尾巴翻到顶部，仍准确指向蚂蚁。 */
-  #speechBubble .b-tail.tail-top {
+  #queenSpeech .b-tail.tail-top, #workerSpeech .b-tail.tail-top {
     top: -8px; bottom: auto;
     border-right: 0; border-bottom: 0;
     border-left: 1px solid var(--border);
@@ -445,15 +448,17 @@
   </div>
   <button class="agent-launcher" id="agentLauncher" title="Agent 信息" aria-label="Agent 信息"><svg class="icon" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></svg></button>
   <div class="agent-pop" id="agentPop" hidden></div>
-  <!-- 蚂蚁助手（左下角待机 / 工作状态切换） -->
-  <div id="ant" aria-label="蚂蚁助手" hidden>
-    <img id="antImg" alt="ant" draggable="false" src="/ant/ant-front-thinking.png">
+  <!-- 蚁后固定在左下角：唯一的输入 / 历史入口，始终可见。 -->
+  <div id="ant" aria-label="蚁后助手" hidden>
+    <img id="antImg" alt="queen ant" draggable="false" src="/ant/ant-front-thinking.png">
   </div>
-  <!-- 气泡：始终跟随蚂蚁右上角，待机显示提示，工作显示 agent 回复 -->
-  <div id="speechBubble" class="empty idle" aria-live="polite" hidden>
-    <div class="b-tail"></div>
-    <div class="b-body"></div>
+  <!-- 工蚁固定从右下角待命；作画时才移动到笔画处，始终可见。 -->
+  <div id="worker" aria-label="作画工蚁" hidden>
+    <img id="workerImg" alt="worker ant" draggable="false" src="/ant/ant-back-with-pen.png">
   </div>
+  <!-- 两个角色各自拥有气泡，互不抢占。 -->
+  <div id="queenSpeech" class="empty idle" aria-live="polite" hidden><div class="b-tail"></div><div class="b-body"></div></div>
+  <div id="workerSpeech" class="empty" aria-live="polite" hidden><div class="b-tail"></div><div class="b-body"></div></div>
   <!-- 输入浮窗（点击蚂蚁弹出） -->
   <div id="inputPop" hidden>
     <div class="head">
@@ -1380,11 +1385,23 @@ async function createBoardFromPop() {
 nbName.addEventListener("keydown", (e) => { if (e.key === "Enter") createBoardFromPop(); });
 
 // ---------- 蚂蚁助手（待机 / 工作两态） ----------
-const antEl = document.getElementById("ant");
+const antEl = document.getElementById("ant"); // 蚁后：固定左下角、唯一交互入口
 const antImg = document.getElementById("antImg");
-const speechEl = document.getElementById("speechBubble");
-const speechBody = speechEl.querySelector(".b-body");
-const speechTail = speechEl.querySelector(".b-tail");
+const workerEl = document.getElementById("worker"); // 工蚁：固定右下角待命，作画时移动
+const workerImg = document.getElementById("workerImg");
+const queenSpeechEl = document.getElementById("queenSpeech");
+const workerSpeechEl = document.getElementById("workerSpeech");
+let speechEl = queenSpeechEl;
+let speechBody = speechEl.querySelector(".b-body");
+let speechTail = speechEl.querySelector(".b-tail");
+let speechAnchor = antEl;
+function useSpeech(anchor, bubble) {
+  // 两只蚂蚁各自保有气泡：切换当前写入目标时不隐藏另一只的提示。
+  speechAnchor = anchor;
+  speechEl = bubble;
+  speechBody = bubble.querySelector(".b-body");
+  speechTail = bubble.querySelector(".b-tail");
+}
 const inputPop = document.getElementById("inputPop");
 const inputText = document.getElementById("inputText");
 const inputSend = document.getElementById("inputSend");
@@ -1438,13 +1455,14 @@ function setAntStatus(status, { force = false } = {}) {
   // 三个气泡互斥：思考/作画时关闭输入与历史。
   if (status === "working") {
     lastAntTarget = { x: NaN, y: NaN };
-    stopIdleTyping();
+    // 蚁后提示独立常驻；工蚁作画不能停止它的逐字输出。
     stopThinkingTyping();
     resetAgentTyping();
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
-    antImg.src = ANT_IMG.working;
-    antEl.classList.add("busy", "flip-off");
+    useSpeech(workerEl, workerSpeechEl);
+    workerImg.src = ANT_IMG.working;
+    workerEl.classList.add("busy", "flip-off");
     // 画画蚂蚁是唯一的书写指示器；气泡在实际开始画对象时才显示说明。
     hideSpeech();
     if (penPos) moveAntToPen(penPos.x, penPos.y);
@@ -1454,17 +1472,19 @@ function setAntStatus(status, { force = false } = {}) {
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
     // 思考的是工蚁：保留工蚁形象，但原地停下，不进入笔画/镜头跟随。
-    antImg.src = ANT_IMG.working;
-    antEl.classList.add("busy", "flip-off");
+    useSpeech(workerEl, workerSpeechEl);
+    workerImg.src = ANT_IMG.working;
+    workerEl.classList.add("busy", "flip-off");
     // 停止镜头惯性，避免工蚁静止思考时摄像机仍继续抢视角。
     camera.stop();
     startThinkingTyping();
   } else {
     stopThinkingTyping();
     resetAgentTyping();
-    antImg.src = ANT_IMG.idle;
-    antEl.classList.remove("busy", "flip-off");
-    moveAntToCorner();
+    useSpeech(antEl, queenSpeechEl);
+    workerImg.src = ANT_IMG.working;
+    workerEl.classList.remove("busy", "flip-off");
+    moveWorkerToCorner();
     // 回合结束后回到待机提示；提示只弹出、逐字播放一次，不循环。
     startIdleTyping();
   }
@@ -1478,11 +1498,16 @@ function svgToScreen(svgX, svgY) {
   return { x: pt.x, y: pt.y };
 }
 
-/** 设置蚂蚁的 transform（以 CSS 变量 --ant-x / --ant-y 写入，使呼吸动画能用） */
-function placeAntAt(left, top) {
+/** 定位两个常驻角色；工蚁移动不影响固定的蚁后。 */
+function placeQueenAt(left, top) {
   antEl.style.setProperty("--ant-x", left.toFixed(1) + "px");
   antEl.style.setProperty("--ant-y", top.toFixed(1) + "px");
   antEl.style.transform = `translate(${left}px, ${top}px)`;
+}
+function placeWorkerAt(left, top) {
+  workerEl.style.setProperty("--ant-x", left.toFixed(1) + "px");
+  workerEl.style.setProperty("--ant-y", top.toFixed(1) + "px");
+  workerEl.style.transform = `translate(${left}px, ${top}px)`;
 }
 
 /** 蚂蚁移动/过渡期间每帧同步气泡位置，确保气泡始终贴着蚂蚁而非停在上一个落点。 */
@@ -1499,12 +1524,17 @@ function scheduleBubbleAfterMove() {
   pendingBubbleFrame = requestAnimationFrame(follow);
 }
 
-/** 待机位置：左下角 */
-function moveAntToCorner() {
+/** 蚁后固定左下角；工蚁的待命位置固定右下角。 */
+function moveQueenToCorner() {
+  const margin = 20;
+  placeQueenAt(margin, window.innerHeight - ANT_SIZE - margin);
+  if (!queenSpeechEl.hidden) requestAnimationFrame(() => positionBubble(antEl, queenSpeechEl));
+}
+function moveWorkerToCorner() {
   camera.stop();
   const margin = 20;
-  placeAntAt(margin, window.innerHeight - ANT_SIZE - margin);
-  scheduleBubbleAfterMove();
+  placeWorkerAt(window.innerWidth - ANT_SIZE - margin, window.innerHeight - ANT_SIZE - margin);
+  if (speechAnchor === workerEl) scheduleBubbleAfterMove();
 }
 
 /** 依据当前 viewBox 把工蚁重新贴到它的世界坐标；摄像机每帧移动时调用。 */
@@ -1514,8 +1544,8 @@ function syncWorkerScreenPosition() {
   // 蚂蚁图中笔尖对准当前世界坐标的书写点。
   const left = screen.x - ANT_PEN_TIP_RATIO.x * ANT_SIZE;
   const top = screen.y - ANT_PEN_TIP_RATIO.y * ANT_SIZE;
-  placeAntAt(left, top);
-  scheduleBubbleAfterMove();
+  placeWorkerAt(left, top);
+  if (speechAnchor === workerEl) scheduleBubbleAfterMove();
 }
 
 /** 工作位置：蚂蚁笔尖对准当前笔画点，同时把该工蚁置于摄像机中心。 */
@@ -1527,10 +1557,10 @@ function moveAntToPen(svgX, svgY) {
 }
 
 /** 气泡跟随：放在蚂蚁右上角外侧，尾巴指向蚂蚁中心 */
-function positionBubble() {
-  const rect = antEl.getBoundingClientRect();
-  const bubbleW = speechEl.offsetWidth;
-  const bubbleH = speechEl.offsetHeight;
+function positionBubble(anchor = speechAnchor, bubble = speechEl) {
+  const rect = anchor.getBoundingClientRect();
+  const bubbleW = bubble.offsetWidth;
+  const bubbleH = bubble.offsetHeight;
   const gap = 10; // 气泡与蚂蚁的间距
   // 默认：气泡在蚂蚁右上方（左下角贴蚂蚁右上角内侧一点）
   // right 边跟蚂蚁的 right 对齐；bottom 边在蚂蚁 top 上方 gap 距离
@@ -1543,18 +1573,19 @@ function positionBubble() {
   // 超上边：放到蚂蚁下面
   if (top < 8) {
     top = rect.bottom + gap;
-    speechTail.classList.add("tail-top");
+    bubble.querySelector(".b-tail").classList.add("tail-top");
   } else {
-    speechTail.classList.remove("tail-top");
+    bubble.querySelector(".b-tail").classList.remove("tail-top");
   }
   // 气泡的缩放原点精确落在蚂蚁中心，弹出时视觉上就是从蚂蚁而来。
   const targetX = rect.left + rect.width / 2;
   const targetY = rect.top + rect.height / 2;
-  setPopPosition(speechEl, left, top, targetX, targetY);
+  setPopPosition(bubble, left, top, targetX, targetY);
   // 尾巴指向蚂蚁中心（气泡底部）
   const tailX = targetX - left - 7; // 7 = 尾巴宽一半
-  speechTail.style.left = Math.max(0, Math.min(tailX, bubbleW - 14)) + "px";
-  speechTail.style.right = "auto";
+  const tail = bubble.querySelector(".b-tail");
+  tail.style.left = Math.max(0, Math.min(tailX, bubbleW - 14)) + "px";
+  tail.style.right = "auto";
 }
 
 /** 给浮层设置位置及从蚂蚁来的缩放原点。 */
@@ -1620,7 +1651,7 @@ function resetAgentTyping() {
  */
 function streamObjectDescription(text) {
   resetAgentTyping();
-  stopIdleTyping();
+  // 仅操作工蚁气泡，蚁后的等待提示保持独立运行。
   const token = agentTypingToken;
   agentTargetText = text;
   streamingObjectDesc = true;
@@ -1658,22 +1689,25 @@ function startIdleTyping() {
   stopIdleTyping();
   streamingObjectDesc = false;
   if (!agentMode || antStatus !== "idle" || !inputPop.hidden || !historyPop.hidden) return;
+  // 蚁后提示绑定自己的 DOM 引用；工蚁切换/移动绝不能抢走它的文本或定时器。
+  const bubble = queenSpeechEl;
+  const body = bubble.querySelector(".b-body");
   const token = idleTypingToken;
   const fullText = tr("antIdleHint");
-  speechEl.classList.add("idle");
-  speechEl.classList.remove("empty");
-  speechEl.hidden = false;
-  speechBody.textContent = "";
-  requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
+  bubble.classList.add("idle");
+  bubble.classList.remove("empty");
+  bubble.hidden = false;
+  body.textContent = "";
+  requestAnimationFrame(() => { positionBubble(antEl, bubble); popFromAnt(bubble); });
   let index = 0;
   const typeNext = () => {
-    if (token !== idleTypingToken || antStatus !== "idle" || !inputPop.hidden || !historyPop.hidden) return;
-    speechBody.textContent = fullText.slice(0, ++index);
-    positionBubble();
+    if (token !== idleTypingToken || !inputPop.hidden || !historyPop.hidden) return;
+    body.textContent = fullText.slice(0, ++index);
+    positionBubble(antEl, bubble);
     if (index < fullText.length) {
       idleTypingTimer = setTimeout(typeNext, fullText[index - 1] === "\n" ? 210 : 92);
     } else {
-      // 等待蚂蚁的入口提示应常驻；仅工蚁作画时的对象说明会在流结束后自动隐藏。
+      // 等待蚁后的入口提示常驻；仅工蚁对象说明会在流结束后自动隐藏。
       idleTypingTimer = null;
     }
   };
@@ -1871,12 +1905,17 @@ async function initAgent() {
     if (!info.ok) return;
     agentMode = true;
     antEl.hidden = false;
-    // 初始状态由 WebSocket 同步；force 让初值也完成一次定位和渲染。
+    workerEl.hidden = false;
+    // 蚁后和工蚁从启动起始终可见：分别固定在左右下角。
+    moveQueenToCorner();
+    moveWorkerToCorner();
+    // 初始状态由 WebSocket 同步；force 让蚁后提示完成一次渲染。
     setAntStatus("idle", { force: true });
-    // 窗口缩放时重新摆位置
+    // 窗口缩放时保持两只蚂蚁各自的落点；作画中的工蚁仍贴笔尖。
     window.addEventListener("resize", () => {
+      moveQueenToCorner();
       if (antStatus === "working" && penPos) moveAntToPen(penPos.x, penPos.y);
-      else moveAntToCorner();
+      else moveWorkerToCorner();
     });
   } catch { /* 非 agent 模式，蚂蚁隐藏 */ }
 }

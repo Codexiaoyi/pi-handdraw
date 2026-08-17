@@ -21,6 +21,17 @@ import { pageStrings, getLang } from "./i18n";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** 画板根目录（可用 HANDDRAW_BOARDS_DIR 覆盖） */
 export const BOARDS_DIR = process.env.HANDDRAW_BOARDS_DIR ?? join(__dirname, "boards");
+
+/** 画板 images/ 目录允许的图片类型 → MIME */
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+};
 /** 旧版单画布状态文件（启动时自动迁移为 default 画板） */
 const LEGACY_STATE_FILE = join(__dirname, "canvas-state.json");
 const ACTIVE_FILE = join(BOARDS_DIR, ".active-board");
@@ -67,6 +78,8 @@ export interface StrokeMsg {
   elementId?: string;
   /** 元素叠放层次（页面按 z 分组排序渲染） */
   z?: number;
+  /** 图片元素：非笔画，页面直接渲染 <image>（src 已解析为可访问 URL） */
+  image?: { src: string; x: number; y: number; w: number; h: number };
 }
 
 export interface CanvasSummary {
@@ -382,6 +395,27 @@ export class CanvasServer {
             const b = this.getBoard(this.boardOf(url));
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ strokes: b.replayCache }));
+            return;
+          }
+          if (url.pathname.startsWith("/images/") && req.method === "GET") {
+            // 画板 images/ 目录静态服务：/images/<画板>/<文件>
+            const parts = url.pathname.slice("/images/".length).split("/").map(decodeURIComponent);
+            const fileName = parts.length === 2 ? parts[1] : "";
+            const okName = /^[A-Za-z0-9._-]+\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName) && !fileName.startsWith(".");
+            if (parts.length === 2 && isValidBoardName(parts[0]) && okName) {
+              try {
+                const data = readFileSync(join(this.boardDir(parts[0]), "images", fileName));
+                const mime = IMAGE_MIME[fileName.slice(fileName.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
+                res.writeHead(200, { "Content-Type": mime });
+                res.end(data);
+              } catch {
+                res.writeHead(404);
+                res.end();
+              }
+            } else {
+              res.writeHead(404);
+              res.end();
+            }
             return;
           }
           if (url.pathname === "/api/boards" && req.method === "GET") {

@@ -17,6 +17,7 @@ import {
   measureText,
   type BuildOptions,
   type HandDrawElement,
+  type ImageElement,
 } from "./draw";
 import {
   getCanvasServer,
@@ -33,6 +34,11 @@ import { t, tArr, getLang, type Lang } from "./i18n";
 // ---------------------------------------------------------------------------
 
 const zProp = { type: "number", description: "叠放层次：小的在下面；不设则后画的在上" };
+const descProp = {
+  type: "string",
+  description:
+    "该对象的详细说明（1~2 句）：架构图写节点职责/关键交互；手帐/旅行规划写描述或小 tips。双击浮窗展示，必填",
+};
 
 const boxLike = (literal: "box" | "ellipse" | "diamond") => ({
   type: "object",
@@ -55,6 +61,7 @@ const boxLike = (literal: "box" | "ellipse" | "diamond") => ({
       description: "填充风格：hachure(手绘斜线)/solid/zigzag/cross-hatch，默认 hachure",
     },
     textSize: { type: "number", description: "文字大小，默认 16" },
+    desc: descProp,
     z: zProp,
   },
   required: ["type", "x", "y"],
@@ -74,6 +81,7 @@ export const ELEMENT_SCHEMA = {
         x2: { type: "number" },
         y2: { type: "number" },
         color: { type: "string" },
+        desc: descProp,
         z: zProp,
       },
       required: ["type", "x1", "y1", "x2", "y2"],
@@ -88,6 +96,7 @@ export const ELEMENT_SCHEMA = {
         y2: { type: "number" },
         text: { type: "string", description: "箭头上的说明文字" },
         color: { type: "string" },
+        desc: descProp,
         z: zProp,
       },
       required: ["type", "x1", "y1", "x2", "y2"],
@@ -104,6 +113,7 @@ export const ELEMENT_SCHEMA = {
         w: { type: "number", description: "段落宽度：设置后开启自动换行（多行模式）" },
         lineHeight: { type: "number", description: "行距（字号倍数，默认 1.6，仅多行）" },
         align: { anyOf: [{ const: "left" }, { const: "center" }, { const: "right" }], description: "对齐（仅多行，默认 left）" },
+        desc: descProp,
         z: zProp,
       },
       required: ["type", "x", "y", "text"],
@@ -117,9 +127,28 @@ export const ELEMENT_SCHEMA = {
         y: { type: "number", description: "左上角 y" },
         size: { type: "number", description: "边长，默认 80" },
         color: { type: "string", description: "整体覆盖描边色（不设用贴纸自带配色）" },
+        desc: descProp,
         z: zProp,
       },
       required: ["type", "name", "x", "y"],
+    },
+    {
+      type: "object",
+      properties: {
+        type: { const: "image" },
+        src: {
+          type: "string",
+          description:
+            "图片来源：http(s):// URL、data:image/...;base64,...、或画板 images/ 目录下的文件名（如 photo.png，文件需已存在）",
+        },
+        x: { type: "number", description: "左上角 x" },
+        y: { type: "number", description: "左上角 y" },
+        w: { type: "number", description: "显示宽度" },
+        h: { type: "number", description: "显示高度" },
+        desc: descProp,
+        z: zProp,
+      },
+      required: ["type", "src", "x", "y", "w", "h"],
     },
     {
       type: "object",
@@ -128,6 +157,7 @@ export const ELEMENT_SCHEMA = {
         d: { type: "string", description: "SVG path 数据" },
         color: { type: "string" },
         fill: { type: "string" },
+        desc: descProp,
         z: zProp,
       },
       required: ["type", "d"],
@@ -225,6 +255,31 @@ export interface ExecuteOptions {
 
 function toElement(raw: { type: string } & Record<string, unknown>): HandDrawElement {
   return raw as unknown as HandDrawElement;
+}
+
+/** 图片 src → 页面可访问 URL；画板 images/ 目录下的文件名映射到静态路由。不合法返回 null */
+function resolveImageSrc(src: string, board: string): string | null {
+  if (/^https?:\/\//i.test(src) || /^data:image\//i.test(src)) return src;
+  if (/^[A-Za-z0-9._-]+\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(src) && !src.startsWith(".")) {
+    return `/images/${encodeURIComponent(board)}/${encodeURIComponent(src)}`;
+  }
+  return null;
+}
+
+/** 图片元素不是笔画：构造一条带 image 字段的消息，页面直接渲染 <image> */
+function imageStrokeMsg(el: ImageElement, board: string, elementId: string, z?: number): StrokeMsg {
+  return {
+    type: "stroke",
+    d: "",
+    color: "",
+    width: 0,
+    dur: 0,
+    penUp: true,
+    label: el.desc ?? el.src.split("/").pop() ?? "image",
+    elementId,
+    z,
+    image: { src: resolveImageSrc(el.src, board)!, x: el.x, y: el.y, w: el.w, h: el.h },
+  };
 }
 
 // ---- 覆盖保护：禁止新元素部分覆盖已有内容 ----
@@ -378,6 +433,18 @@ function toElementInfo(el: HandDrawElement): CanvasElementInfo {
       h: size,
       z,
       meta: compactMeta({ desc, name: el.name, size, color: el.color }),
+    };
+  }
+  if (el.type === "image") {
+    return {
+      type: "image",
+      label: desc ?? el.src.split("/").pop(),
+      x: el.x,
+      y: el.y,
+      w: el.w,
+      h: el.h,
+      z,
+      meta: compactMeta({ desc, src: el.src }),
     };
   }
   // path
@@ -648,6 +715,10 @@ export async function executeCanvasAction(
       warnings.push(t("tool.stickerUnknown", { name: el.name }));
       return false;
     }
+    if (el.type === "image" && !resolveImageSrc(el.src, board)) {
+      warnings.push(t("tool.imageBadSrc", { src: String(el.src).slice(0, 60) }));
+      return false;
+    }
     return true;
   });
 
@@ -683,6 +754,18 @@ export async function executeCanvasAction(
       return { text: t("tool.updateNeedId"), details: {} };
     }
     const el = validElements[0];
+    if (el.type === "image") {
+      const info = toElementInfo(el);
+      const msgs = [imageStrokeMsg(el, board, params.elementId, info.z)];
+      const ok = await modifyCanvas(board, "update", params.elementId, msgs, info);
+      const summary = (await canvasSummary(board)) as unknown as Summary;
+      return {
+        text: ok
+          ? t("tool.updated", { id: params.elementId, label: String(info.label ?? "image"), strokes: 1, count: summary.elementCount })
+          : t("tool.elNotFound", { id: params.elementId }),
+        details: { ok, board },
+      };
+    }
     const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
     const msgs: StrokeMsg[] = strokes.map((s) => ({
       type: "stroke",
@@ -731,9 +814,15 @@ export async function executeCanvasAction(
   const infos: CanvasElementInfo[] = [];
   for (const el of validElements) {
     const elId = `el${Math.floor(Math.random() * 1e9).toString(36)}`;
-    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
     const info = toElementInfo(el);
     info.id = elId;
+    if (el.type === "image") {
+      // 图片不是笔画：直接推 image 消息，页面即时渲染
+      allMsgs.push(imageStrokeMsg(el, board, elId, info.z));
+      infos.push(info);
+      continue;
+    }
+    const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
     for (const s of strokes) {
       allMsgs.push({
         type: "stroke",

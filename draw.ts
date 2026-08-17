@@ -97,7 +97,23 @@ export interface PathElement {
   z?: number;
 }
 
-export type HandDrawElement = BoxLikeElement | LineLikeElement | TextElement | StickerElement | PathElement;
+export interface ImageElement {
+  type: "image";
+  /** 图片来源：http(s) URL、data:image/...;base64,...、或画板 images/ 目录下的文件名 */
+  src: string;
+  /** 左上角 */
+  x: number;
+  y: number;
+  /** 显示宽高 */
+  w: number;
+  h: number;
+  /** agent 写的说明，双击浮窗展示 */
+  desc?: string;
+  /** 叠放层次：小的在下面；不设则后画的在上 */
+  z?: number;
+}
+
+export type HandDrawElement = BoxLikeElement | LineLikeElement | TextElement | StickerElement | PathElement | ImageElement;
 
 export interface BuildOptions {
   title?: string;
@@ -786,6 +802,7 @@ function elementParts(el: HandDrawElement, t: SpeedTiming, elIndex: number): Ani
   }
 
   if (el.type === "sticker") return []; // 贴纸仅实时画布（buildStrokeSequence）支持
+  if (el.type === "image") return []; // 图片仅实时画布支持（非笔画，core 直接推 image 消息）
 
   if (el.type === "text") {
     return textParts(el.text.replace(/\n/g, " "), el.x, el.y, el.size ?? 16, el.color ?? "#263238", t.strokeFrames, t.strokeInterval);

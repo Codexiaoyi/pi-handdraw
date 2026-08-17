@@ -19,7 +19,7 @@ const zh: Dict = {
     "在实时画布上增量绘制（浏览器无限画布 + 钢笔指示器逐笔书写）。\n" +
     "每次调用只画 1~3 个元素，调用后浏览器里会实时出现新笔画（钢笔跟随书写）。\n" +
     "元素必须用绝对坐标（box/ellipse/diamond 的 x/y 是左上角，w/h 是宽高）。\n" +
-    "元素类型：box/ellipse/diamond/line/arrow/text/path/sticker（贴纸，按 name 引用，清单见 status 返回）。\n" +
+    "元素类型：box/ellipse/diamond/line/arrow/text/path/sticker（贴纸，按 name 引用，清单见 status 返回）/image（图片，直接显示）。\n" +
     "画布分多个画板（board）：默认画到当前画板，可用 board 参数指定目标画板（画板管理用 handdraw_board 工具）。\n" +
     "画布自动扩展，元素可以放到任意坐标。",
   "tool.guidelines": [
@@ -36,7 +36,8 @@ const zh: Dict = {
     "text 元素支持多行：用 \\n 分行，或设置 w 开启自动换行（此时 x,y 为段落左上角，可配 lineHeight 行距倍数和 align 对齐）；单行时 x,y 为文字中心（旧行为）。",
     "元素可用 z 控制叠放层次（小的在下）：底色块、装饰贴纸压在文字下时记得给它们更小的 z；不设 z 时后画的在上。",
     "贴纸用 {type:\"sticker\", name, x, y, size?, color?} 绘制；可用贴纸名字从 status 返回的 stickers 列表获取，不要编造不存在的贴纸名。",
-    "每个元素都必须填 \"desc\" 字段（agent 写的自然语言说明，如「用户登录入口」、「数据库连接池」），不是形状名（如「画框/椭圆」），双击对象时会弹出浮窗展示给用户。没有合适的语义时也必须填上该对象在图中承担的角色。",
+    "每个元素都必须填 \"desc\" 字段：写这个对象本身的详细说明（1~2 句话），不是形状名（如「画框/椭圆」）、也不是把标签文字复述一遍。架构图场景：说明该节点的职责和关键交互，如「订单服务：负责下单与订单查询，通过 MQ 异步通知库存服务扣减库存」；手帐/旅行规划场景：写一段描述或小 tips，如「Day1 清水寺：建议 8:00 前到避开人流，顺路逛三年坂二年坂，午餐推荐抹茶荞麦面」。双击对象时 desc 会以浮窗展示给用户。",
+    "图片用 {type:\"image\", src, x, y, w, h} 放置（不是笔画，会直接显示）：src 支持 http(s) URL、data:image/ base64、或画板 images/ 目录下已存在的文件名（如 photo.png）；图片也必须填 desc 说明图片内容。",
   ],
   "tool.serverFail": "❌ 无法启动实时画布服务器。",
   "tool.cleared": "🧹 画布已清空。",
@@ -44,6 +45,7 @@ const zh: Dict = {
   "tool.removeNeedId": "remove 需要 elementId。",
   "tool.elNotFound": "❌ 元素 {id} 不存在。可用 status 查看当前元素 ID。",
   "tool.stickerUnknown": "⚠️ 未知贴纸「{name}」，已跳过（可用贴纸见 status 返回的 stickers 列表）。",
+  "tool.imageBadSrc": "⚠️ 图片来源「{src}」不合法或不受支持（支持 http(s) URL、data:image/ base64、或画板 images/ 目录下的 png/jpg/gif/webp/bmp/svg 文件名），已跳过。",
   "tool.overlap":
     "❌ 拒绝绘制：以下新元素会覆盖已有内容：{hits}。\n" +
     "请参照空位（{spots}）重新排布后重试。完全包含关系（容器装子元素/底色块垫文字）不会被拦截；若确实需要有意的覆盖，传 allowOverlap: true。",
@@ -103,7 +105,7 @@ const en: Dict = {
     "Draw incrementally on a live canvas (infinite browser canvas + a pen indicator writing stroke by stroke).\n" +
     "Draw only 1~3 elements per call; new strokes appear in the browser in real time (pen follows the writing).\n" +
     "Elements use absolute coordinates (for box/ellipse/diamond, x/y is the top-left corner, w/h the size).\n" +
-    "Element types: box/ellipse/diamond/line/arrow/text/path/sticker (predefined doodles referenced by name; see the stickers list returned by status).\n" +
+    "Element types: box/ellipse/diamond/line/arrow/text/path/sticker (predefined doodles referenced by name; see the stickers list returned by status)/image (a picture, shown instantly).\n" +
     "The canvas is organized into boards: draw calls go to the active board unless a board parameter is given (manage boards with the handdraw_board tool).\n" +
     "The canvas auto-expands; elements can be placed at any coordinates.",
   "tool.guidelines": [
@@ -120,7 +122,8 @@ const en: Dict = {
     "text elements support multiple lines: use \\n for line breaks, or set w for automatic wrapping (then x,y is the top-left of the paragraph; lineHeight is a multiple of font size, align can be left/center/right). Single-line text keeps the old behavior: x,y is the text center.",
     "Elements accept z for stacking order (smaller goes below): give background blocks and decorative stickers a smaller z when they should sit under text; without z, later draws go on top.",
     "Stickers are drawn with {type:\"sticker\", name, x, y, size?, color?}; get available sticker names from the stickers list in the status result — never invent sticker names.",
-    "Every element MUST include a \"desc\" field with a natural-language description (e.g. \"user login entry\", \"database connection pool\") — NOT a shape name like \"box/ellipse\". The desc is shown in a popup when the user double-clicks the object.",
+    "Every element MUST include a \"desc\" field with a detailed 1-2 sentence description of the object itself — not a shape name (like \"box\") and not a copy of its label text. Architecture diagrams: state the node's responsibility and key interactions, e.g. \"Order service: handles order creation/queries; notifies inventory via MQ to deduct stock\". Journal / travel-planning scenes: write a description or small tips, e.g. \"Day 1 Kiyomizu-dera: arrive before 8am to beat the crowds, stroll Sannenzaka on the way; try matcha soba for lunch\". The desc is shown in a popup when the user double-clicks the object.",
+    "Place pictures with {type:\"image\", src, x, y, w, h} (not a stroke — it appears instantly): src accepts an http(s) URL, a data:image/ base64 string, or the filename of an existing file in the board's images/ directory (e.g. photo.png); images also need a desc explaining what they show.",
   ],
   "tool.serverFail": "❌ Failed to start the live canvas server.",
   "tool.cleared": "🧹 Canvas cleared.",
@@ -128,6 +131,7 @@ const en: Dict = {
   "tool.removeNeedId": "remove requires elementId.",
   "tool.elNotFound": "❌ Element {id} does not exist. Use status to see current element IDs.",
   "tool.stickerUnknown": "⚠️ Unknown sticker \"{name}\", skipped (see the stickers list in the status result).",
+  "tool.imageBadSrc": "⚠️ Image source \"{src}\" is invalid or unsupported (supports http(s) URLs, data:image/ base64, or png/jpg/gif/webp/bmp/svg files in the board's images/ directory); skipped.",
   "tool.overlap":
     "❌ Draw rejected: these new elements would cover existing content: {hits}.\n" +
     "Re-layout at the free spots ({spots}) and retry. Full containment (child inside container / background block) is not blocked; if the overlap is intentional, pass allowOverlap: true.",

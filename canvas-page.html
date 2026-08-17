@@ -685,6 +685,18 @@ async function playStroke(s) {
 function drawStrokeInstant(s, root = content) {
   totalStrokes++;
   const group = elGroup(s.elementId, s.z, root);
+  if (s.image) {
+    // 图片元素：直接渲染 <image>，无笔画动画
+    const img = svgNS("image");
+    img.setAttribute("x", s.image.x);
+    img.setAttribute("y", s.image.y);
+    img.setAttribute("width", s.image.w);
+    img.setAttribute("height", s.image.h);
+    img.setAttribute("href", s.image.src);
+    img.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    group.appendChild(img);
+    return;
+  }
   if (s.isText) {
     const g = svgNS("g");
     g.innerHTML = s.d;
@@ -758,6 +770,7 @@ function handleStrokes(strokes) {
     controlsEl.classList.add("dim");
     try {
       for (const s of strokes) {
+        if (s.image) { drawStrokeInstant(s); continue; } // 图片直接出现，不走钢笔动画
         totalStrokes++;
         progEl.textContent = totalStrokes + tr("strokeUnit");
         labelEl.textContent = "✏️ " + (s.label || "绘制");

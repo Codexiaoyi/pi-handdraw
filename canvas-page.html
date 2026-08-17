@@ -1127,7 +1127,8 @@ function finishDrawingIfIdle() {
   shownDescriptionFor = null;
   // 不截断仍在逐字输出的 desc；它完成后会自行收起。
   if (streamingObjectDesc) return;
-  hideSpeech();
+  // 队列结束时当前 speech 是工蚁；不能调用 hideSpeech()，否则会停止蚁后的循环提示。
+  workerSpeechEl.hidden = true;
   if (!replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
 }
 function handleStrokes(strokes) {
@@ -1463,11 +1464,11 @@ function setAntStatus(status, { force = false } = {}) {
     useSpeech(workerEl, workerSpeechEl);
     workerImg.src = ANT_IMG.working;
     workerEl.classList.add("busy", "flip-off");
-    // 画画蚂蚁是唯一的书写指示器；气泡在实际开始画对象时才显示说明。
-    hideSpeech();
+    // 画画蚂蚁是唯一的书写指示器；只收起工蚁气泡，不能停止蚁后的独立循环提示。
+    workerSpeechEl.hidden = true;
     if (penPos) moveAntToPen(penPos.x, penPos.y);
   } else if (status === "thinking") {
-    stopIdleTyping();
+    // 蚁后的入口提示独立循环；工蚁思考时不能中断它。
     resetAgentTyping();
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
@@ -1481,6 +1482,9 @@ function setAntStatus(status, { force = false } = {}) {
   } else {
     stopThinkingTyping();
     resetAgentTyping();
+    // 状态离开工蚁后，必须收起它自己的气泡；当前 speech 已切到蚁后时，
+    // 不能再通过 hideSpeech() 间接操作，否则会留下“思考中…”卡在右下角。
+    workerSpeechEl.hidden = true;
     useSpeech(antEl, queenSpeechEl);
     workerImg.src = ANT_IMG.working;
     workerEl.classList.remove("busy", "flip-off");
@@ -1616,20 +1620,24 @@ function stopThinkingTyping() {
 function startThinkingTyping() {
   stopThinkingTyping();
   if (!agentMode || antStatus !== "thinking" || !inputPop.hidden || !historyPop.hidden) return;
+  // 捕获工蚁自己的节点，避免状态切换时全局 speech 指针改到蚁后，旧定时器误写错气泡。
+  const bubble = workerSpeechEl;
+  const body = bubble.querySelector(".b-body");
   const token = thinkingTypingToken;
   const fullText = tr("antWorkingEmpty");
-  speechEl.classList.remove("idle", "empty");
-  speechEl.hidden = false;
-  speechBody.textContent = "";
-  requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
+  bubble.classList.remove("idle", "empty");
+  bubble.hidden = false;
+  body.textContent = "";
+  requestAnimationFrame(() => { positionBubble(workerEl, bubble); popFromAnt(bubble); });
   let index = 0;
   const typeNext = () => {
     if (token !== thinkingTypingToken || antStatus !== "thinking") return;
-    speechBody.textContent = fullText.slice(0, ++index);
-    positionBubble();
+    body.textContent = fullText.slice(0, ++index);
+    positionBubble(workerEl, bubble);
     if (index < fullText.length) {
       thinkingTypingTimer = setTimeout(typeNext, 130);
     } else {
+      // 用新的 loop 启动函数重置 token 和文本，确保每轮都会从头逐字播放。
       thinkingTypingTimer = setTimeout(startThinkingTyping, 1000);
     }
   };
@@ -1668,7 +1676,8 @@ function streamObjectDescription(text) {
       agentHideTimer = setTimeout(() => {
         if (token !== agentTypingToken || agentVisibleText.length < agentTargetText.length) return;
         streamingObjectDesc = false;
-        hideSpeech();
+        // 只收起工蚁说明；hideSpeech() 会停止蚁后的待机打字循环，不能在这里调用。
+        workerSpeechEl.hidden = true;
         // 若 agent 已结束、笔画也播完，再退出作画姿态；否则保持工蚁待命但不显示气泡。
         if (drawingJobs === 0 && !replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
       }, 650);
@@ -1684,7 +1693,7 @@ function streamObjectDescription(text) {
   };
   agentTypingTimer = setTimeout(writeNext, 40);
 }
-/** 待机提示：从蚂蚁身边弹出并逐字播放一次，不循环。 */
+/** 待机提示：从蚁后身边逐字播放，短暂停留后循环，直到用户打开输入或历史浮窗。 */
 function startIdleTyping() {
   stopIdleTyping();
   streamingObjectDesc = false;
@@ -1707,8 +1716,8 @@ function startIdleTyping() {
     if (index < fullText.length) {
       idleTypingTimer = setTimeout(typeNext, fullText[index - 1] === "\n" ? 210 : 92);
     } else {
-      // 等待蚁后的入口提示常驻；仅工蚁对象说明会在流结束后自动隐藏。
-      idleTypingTimer = null;
+      // 完整提示短暂停留后从头播放；重新启动会换 token，避免旧定时器残留。
+      idleTypingTimer = setTimeout(startIdleTyping, 1200);
     }
   };
   idleTypingTimer = setTimeout(typeNext, 180);
@@ -1732,7 +1741,10 @@ function hideSpeech() {
   speechEl.hidden = true;
 }
 function restoreIdleSpeech() {
-  if (agentMode && antStatus === "idle" && inputPop.hidden && historyPop.hidden) startIdleTyping();
+  if (!agentMode || !inputPop.hidden || !historyPop.hidden) return;
+  // 输入/历史浮窗会暂时打断提示；关闭后按当前角色状态恢复各自的循环。
+  if (antStatus === "thinking") startThinkingTyping();
+  else if (antStatus === "idle") startIdleTyping();
 }
 
 /** 点击蚂蚁 -> 输入浮窗；双击 -> 历史浮窗 */

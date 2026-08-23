@@ -37,10 +37,9 @@ const LEGACY_STATE_FILE = join(__dirname, "canvas-state.json");
 const ACTIVE_FILE = join(BOARDS_DIR, ".active-board");
 export const DEFAULT_BOARD = "default";
 
-/** 候选端口（8787 可能被其他项目占用；可用 HANDDRAW_CANVAS_PORTS=端口1,端口2 覆盖） */
-export const CANVAS_PORTS =
-  process.env.HANDDRAW_CANVAS_PORTS?.split(",").map(Number).filter((n) => n > 0) ?? [8788, 8789, 8790, 8791];
-export const CANVAS_PORT = CANVAS_PORTS[0];
+/** Handdraw 固定端口：不再自动切换到其他端口；可用 HANDDRAW_CANVAS_PORT 覆盖。 */
+export const CANVAS_PORT = Number(process.env.HANDDRAW_CANVAS_PORT ?? 8788);
+export const CANVAS_PORTS = [CANVAS_PORT];
 
 export interface CanvasElementInfo {
   /** 元素唯一 ID（修改/删除用） */
@@ -80,6 +79,10 @@ export interface StrokeMsg {
   elementId?: string;
   /** 元素叠放层次（页面按 z 分组排序渲染） */
   z?: number;
+  /** 异步调度时负责该笔画的工蚁 ID */
+  workerId?: string;
+  /** 异步调度任务 ID；服务端据此绑定当前区域预留 */
+  taskId?: string;
   /** 图片元素：非笔画，页面直接渲染 <image>（src 已解析为可访问 URL） */
   image?: { src: string; x: number; y: number; w: number; h: number };
 }
@@ -140,6 +143,27 @@ export class CanvasServer {
   private clients = new Map<WebSocket, string>();
   /** agent 是否在工作（思考+作画）：新连接会同步该状态 */
   private agentWorking = false;
+  /** 当前异步绘图 worker 的状态，按画板隔离，供页面显示调度进度和区域校验 */
+  private workerStates = new Map<string, Array<{
+    id: string;
+    status: string;
+    taskId?: string;
+    region?: { x: number; y: number; w: number; h: number };
+  }>>();
+
+  private getWorkerStates(board: string): Array<{
+    id: string;
+    status: string;
+    taskId?: string;
+    region?: { x: number; y: number; w: number; h: number };
+  }> {
+    let states = this.workerStates.get(board);
+    if (!states) {
+      states = Array.from({ length: 4 }, (_, i) => ({ id: `worker-${i + 1}`, status: "idle" }));
+      this.workerStates.set(board, states);
+    }
+    return states;
+  }
   private pageHtml = "";
   private actualPort = 0;
   /** 额外路由（web-agent 模式注册聊天 API 用），在内置路由全部未命中后调用 */
@@ -480,10 +504,38 @@ export class CanvasServer {
               this.pushStrokes(board, body.strokes ?? [], body.elements ?? []);
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify(this.getSummary(board)));
-            } catch {
-              res.writeHead(400);
-              res.end();
+            } catch (error) {
+              res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
             }
+            return;
+          }
+          if (req.method === "GET" && url.pathname === "/api/workers") {
+            const board = this.boardOf(url);
+            const workers = this.getWorkerStates(board);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ board, workers }));
+            return;
+          }
+          if (req.method === "POST" && url.pathname === "/api/workers/status") {
+            const body = (await this.readBody(req).catch(() => ({}))) as {
+              id?: string;
+              status?: string;
+              taskId?: string;
+              board?: string;
+              region?: { x: number; y: number; w: number; h: number };
+            };
+            const board = this.boardOf(url, body);
+            const workers = this.getWorkerStates(board);
+            const worker = workers.find((w) => w.id === body.id);
+            if (worker) {
+              worker.status = body.status ?? worker.status;
+              worker.taskId = body.taskId;
+              worker.region = body.region;
+              this.broadcast(board, JSON.stringify({ type: "workers", workers }));
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: Boolean(worker), board, workers }));
             return;
           }
           if (req.method === "POST" && url.pathname === "/api/agent-status") {
@@ -556,6 +608,8 @@ export class CanvasServer {
         }
         // 同步当前 agent 工作状态（呼吸灯）
         ws.send(JSON.stringify({ type: "agent", working: this.agentWorking }));
+        // 同步四个异步工蚁的当前状态
+        ws.send(JSON.stringify({ type: "workers", workers: this.getWorkerStates(board) }));
       });
 
       http.on("error", (err: NodeJS.ErrnoException) => {
@@ -586,8 +640,36 @@ export class CanvasServer {
 
   // ---- 绘制操作（全部按画板隔离） ----
 
+  private rectContains(
+    outer: { x: number; y: number; w: number; h: number },
+    inner: { x: number; y: number; w: number; h: number },
+    tolerance = 2
+  ): boolean {
+    return inner.x >= outer.x - tolerance && inner.y >= outer.y - tolerance &&
+      inner.x + inner.w <= outer.x + outer.w + tolerance && inner.y + inner.h <= outer.y + outer.h + tolerance;
+  }
+
+  private validateWorkerPush(board: string, strokes: StrokeMsg[], elements: CanvasElementInfo[]): void {
+    const workerIds = new Set(strokes.map((s) => s.workerId).filter((id): id is string => Boolean(id)));
+    for (const workerId of workerIds) {
+      const worker = this.getWorkerStates(board).find((w) => w.id === workerId);
+      if (!worker || worker.status !== "drawing" || !worker.taskId || !worker.region) {
+        throw new Error(`工蚁 ${workerId} 没有可用的活动任务区域`);
+      }
+      for (const stroke of strokes) {
+        if (stroke.taskId !== worker.taskId) throw new Error(`工蚁 ${workerId} 的任务 ID 不匹配`);
+      }
+      for (const info of elements) {
+        if (!this.rectContains(worker.region, info)) {
+          throw new Error(`工蚁 ${workerId} 的元素超出任务区域`);
+        }
+      }
+    }
+  }
+
   /** 追加元素并推送笔画（工具每次调用） */
   pushStrokes(board: string, strokes: StrokeMsg[], elements: CanvasElementInfo[]): void {
+    this.validateWorkerPush(board, strokes, elements);
     const b = this.getBoard(board);
     const zOf = new Map<string, number>();
     for (const el of elements) {
@@ -607,6 +689,7 @@ export class CanvasServer {
 
   /** 更新元素：删除旧笔画 + 推送新笔画（z 默认沿用原值） */
   updateElement(board: string, elementId: string, strokes: StrokeMsg[], newInfo: CanvasElementInfo): boolean {
+    this.validateWorkerPush(board, strokes, [newInfo]);
     const b = this.getBoard(board);
     const idx = b.elements.findIndex((e) => e.id === elementId);
     if (idx === -1) return false;
@@ -656,17 +739,33 @@ export class CanvasServer {
     }
   }
 
-  /** Agent 文本流：广播给所有画板，驱动蚂蚁气泡（增量 delta 由调用方决定节流粒度） */
-  broadcastSpeech(payload: { delta?: string; full?: string; done?: boolean }): void {
-    const msg = JSON.stringify({ type: "speech", ...payload });
-    for (const [ws] of this.clients) {
-      if (ws.readyState === ws.OPEN) ws.send(msg);
+  /** Agent 文本流：只广播给目标画板，驱动蚁后/工蚁气泡（增量 delta 由调用方决定节流粒度）。
+   * kind: 'text' 默认蚁后文本；'thinking' 蚁后/工蚁思考增（带 workerId 时表示该工蚁在思考）。
+   * workerId: 'worker-1'..'worker-4'，用于前端路由到对应工蚁独立气泡。 */
+  broadcastSpeech(payload: {
+    board?: string;
+    delta?: string;
+    full?: string;
+    done?: boolean;
+    kind?: "text" | "thinking";
+    workerId?: string;
+  }): void {
+    const { board, ...message } = payload;
+    const msg = JSON.stringify({ type: "speech", ...message });
+    for (const [ws, subscribedBoard] of this.clients) {
+      if ((!board || subscribedBoard === board) && ws.readyState === ws.OPEN) ws.send(msg);
     }
   }
 
   private broadcast(board: string, msg: string): void {
     for (const [ws, b] of this.clients) {
       if (b === board && ws.readyState === ws.OPEN) ws.send(msg);
+    }
+  }
+
+  private broadcastAll(msg: string): void {
+    for (const [ws] of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(msg);
     }
   }
 

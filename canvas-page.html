@@ -179,7 +179,7 @@
   .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
   /* ---------- 蚂蚁助手（左下角）+ 气泡 + 输入/历史浮窗 ---------- */
   /* 蚂蚁本体：HTML 元素，absolute 定位 + transform 平移；图片本身宽高固定，位置由 JS 写入 */
-  #ant, #worker {
+  #ant, #worker, .worker-ant {
     position: fixed; left: 0; top: 0;
     width: 66px; height: 66px;
     z-index: 11;
@@ -192,10 +192,10 @@
     filter: drop-shadow(0 4px 8px rgba(40, 30, 20, 0.22));
   }
   /* 工蚁始终显示在右下角或当前笔画处，不接受交互。 */
-  #worker { cursor: default; pointer-events: none; }
+  #worker, .worker-ant { cursor: default; pointer-events: none; }
   #ant.dragging { cursor: grabbing; }
   /* 工蚁作画时以极短线性过渡追随笔迹：消除瞬移，同时不明显落后于笔尖。 */
-  #worker.busy { cursor: default; transition: transform 90ms linear; animation: antBreathe 2.4s ease-in-out infinite; }
+  #worker.busy, .worker-ant.busy { cursor: default; transition: transform 45ms linear; animation: antBreathe 2.4s ease-in-out infinite; }
   /* 输入浮窗打开时，蚁后不能点击；三个浮层的入口保持互斥。 */
   body.input-open #ant { pointer-events: none; cursor: default; }
   /* 工作状态时给蚂蚁加个轻呼吸阴影脉动（不要改 transform，避免覆盖 inline translate） */
@@ -203,7 +203,7 @@
     0%, 100% { filter: drop-shadow(0 6px 14px rgba(40, 30, 20, 0.18)); }
     50%      { filter: drop-shadow(0 10px 22px rgba(40, 30, 20, 0.32)); }
   }
-  #ant img, #worker img {
+  #ant img, #worker img, .worker-ant img {
     width: 100%; height: 100%;
     display: block;
     /* 默认朝右（待机的正面思考图，朝向屏幕右边，画在右侧）；背面图朝向左边 */
@@ -213,9 +213,9 @@
   }
   /* 背面握笔图（工作状态）原始朝向是右边带笔尖，所以去掉翻转 */
   /* 工蚁始终保持握笔图原始朝向；蚁后才使用镜像朝向。 */
-  #worker img, #worker.flip-off img { transform: none; }
+  #worker img, .worker-ant img, #worker.flip-off img { transform: none; }
   /* ---------- 气泡：始终跟随蚂蚁右上角 ---------- */
-  #queenSpeech, #workerSpeech {
+  #queenSpeech, .worker-speech {
     position: fixed; left: 0; top: 0;
     z-index: 12;
     /* 气泡随逐字输出自然长大；到达屏幕安全宽度后再换行增高。 */
@@ -240,20 +240,25 @@
     pointer-events: none;
   }
   /* 所有浮层都从蚂蚁所在位置弹出，避免像从页面顶部掉下来。 */
-  #queenSpeech.pop-in, #workerSpeech.pop-in, #inputPop.pop-in, #historyPop.pop-in {
+  #queenSpeech.pop-in, .worker-speech.pop-in, #inputPop.pop-in, #historyPop.pop-in {
     animation: popFromAnt 520ms cubic-bezier(0.18, 0.82, 0.25, 1.18) both;
   }
   @keyframes popFromAnt {
     from { opacity: 0; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(0.12); }
     to { opacity: 1; transform: translate(var(--pop-x, 0px), var(--pop-y, 0px)) scale(1); }
   }
-  #queenSpeech .b-body, #workerSpeech .b-body {
+  #queenSpeech .b-body, .worker-speech .b-body {
     max-height: 30vh; overflow-y: auto; white-space: pre-wrap;
   }
-  #queenSpeech.empty .b-body, #workerSpeech.empty .b-body { color: var(--muted); font-style: italic; }
-  #queenSpeech.idle .b-body, #workerSpeech.idle .b-body { color: var(--ink); }
-  #queenSpeech.busy .b-body, #workerSpeech.busy .b-body { color: var(--ink); }
-  #queenSpeech .b-tail, #workerSpeech .b-tail {
+  #queenSpeech.empty .b-body, .worker-speech.empty .b-body { color: var(--muted); font-style: italic; }
+  #queenSpeech.idle .b-body, .worker-speech.idle .b-body { color: var(--ink); }
+  #queenSpeech.busy .b-body, .worker-speech.busy .b-body { color: var(--ink); }
+  /* 思考/推理气泡：灰色斜体+“💭”表示中间状态；被最终 text 覆盖后移除。 */
+  #queenSpeech.thinking .b-body, .worker-speech.thinking .b-body { color: #6b6b76; font-style: italic; }
+  #queenSpeech.thinking .b-body::before, .worker-speech.thinking .b-body::before { content: "💭 "; opacity: 0.85; font-style: normal; }
+  /* 工蚁气泡：贴各自工蚁蚂蚁，默认收起 4 个气泡；size 与蚁后一致。 */
+  .worker-speech { max-width: 260px; font-size: 12px; }
+  #queenSpeech .b-tail, .worker-speech .b-tail {
     position: absolute;
     bottom: -8px;
     width: 14px; height: 14px;
@@ -263,7 +268,7 @@
     transform: rotate(45deg);
   }
   /* 气泡在蚂蚁下方时，尾巴翻到顶部，仍准确指向蚂蚁。 */
-  #queenSpeech .b-tail.tail-top, #workerSpeech .b-tail.tail-top {
+  #queenSpeech .b-tail.tail-top, .worker-speech .b-tail.tail-top {
     top: -8px; bottom: auto;
     border-right: 0; border-bottom: 0;
     border-left: 1px solid var(--border);
@@ -344,9 +349,16 @@
     border-bottom-right-radius: 4px;
   }
   #historyPop .msg.agent {
-    align-self: flex-start; background: rgba(16, 24, 40, 0.06); color: var(--ink);
+    align-self: flex-start; background: rgba(79, 70, 229, 0.10); color: var(--ink);
     border-bottom-left-radius: 4px;
   }
+  #historyPop .msg.system, #historyPop .msg.worker {
+    align-self: flex-start; background: rgba(16, 24, 40, 0.06); color: var(--muted);
+    border-left: 3px solid var(--accent); border-radius: 8px;
+    font-size: 11.5px;
+  }
+  #historyPop .msg.worker { border-left-color: #d97706; }
+  #historyPop .msg-role { display: block; font-size: 10px; font-weight: 600; opacity: .72; margin-bottom: 2px; }
   #historyPop .empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 12px; }
   /* ---------- 元素选中：蚂蚁线高亮框 + 操作条 ---------- */
   .sel-rect {
@@ -460,12 +472,13 @@
     <img id="antImg" alt="queen ant" draggable="false" src="/ant/ant-front-thinking.png">
   </div>
   <!-- 工蚁固定从右下角待命；作画时才移动到笔画处，始终可见。 -->
-  <div id="worker" aria-label="作画工蚁" hidden>
-    <img id="workerImg" alt="worker ant" draggable="false" src="/ant/ant-back-with-pen.png">
+  <div id="worker" class="worker-ant" aria-label="作画工蚁 1" hidden>
+    <img id="workerImg-1" alt="worker ant 1" draggable="false" src="/ant/ant-back-with-pen.png">
   </div>
   <!-- 两个角色各自拥有气泡，互不抢占。 -->
   <div id="queenSpeech" class="empty idle" aria-live="polite" hidden><div class="b-tail"></div><div class="b-body"></div></div>
-  <div id="workerSpeech" class="empty" aria-live="polite" hidden><div class="b-tail"></div><div class="b-body"></div></div>
+  <!-- 工蚁 1 的默认气泡保留在 DOM；worker-2/3/4 会在收到 speech 时动态创建。 -->
+  <div id="worker-1-speech" class="empty worker-speech" aria-live="polite" hidden><div class="b-tail"></div><div class="b-body"></div></div>
   <!-- 输入浮窗（点击蚂蚁弹出） -->
   <div id="inputPop" hidden>
     <div class="head">
@@ -666,13 +679,55 @@ function restoreView() {
 }
 function resetView() {
   camera.stop();
+  frameContentIntoView();
+}
+/** 将镜头移动到当前内容；保留少量边距，避免新画内容落在默认视口之外。 */
+function frameBBoxIntoView(bb) {
+  if (!bb || !bb.width || !bb.height) return;
   const r = svg.getBoundingClientRect();
-  const W = vb.w, H = vb.h;
-  const ratio = r.width / r.height;
-  let w = W, h = H;
-  if (W / H > ratio) { h = H; w = H * ratio; } else { w = W; h = W / ratio; }
-  vb = { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  const ratio = r.width / Math.max(1, r.height);
+  const pad = 70;
+  const contentW = bb.width + pad * 2;
+  const contentH = bb.height + pad * 2;
+  let w = Math.max(50, contentW);
+  let h = Math.max(50, contentH);
+  if (w / h > ratio) h = w / ratio;
+  else w = h * ratio;
+  // 不让“适应”把极大画板缩成看不清的缩略图。
+  const maxW = 800000;
+  if (w > maxW) { w = maxW; h = w / ratio; }
+  vb = { x: bb.x + bb.width / 2 - w / 2, y: bb.y + bb.height / 2 - h / 2, w, h };
   applyView();
+  scheduleSaveView();
+}
+function frameContentIntoView() {
+  frameBBoxIntoView(content.getBBox());
+}
+function frameIncomingElementsIntoView(strokes) {
+  const ids = new Set(strokes.map((s) => s.elementId).filter(Boolean));
+  const groups = [...content.querySelectorAll("g.el")].filter((g) => ids.has(g.getAttribute("data-element-id")));
+  if (!groups.length) return;
+  let bb = null;
+  for (const group of groups) {
+    const part = group.getBBox();
+    if (!part.width && !part.height) continue;
+    if (!bb) bb = { x: part.x, y: part.y, width: part.width, height: part.height };
+    else {
+      const right = Math.max(bb.x + bb.width, part.x + part.width);
+      const bottom = Math.max(bb.y + bb.height, part.y + part.height);
+      bb.x = Math.min(bb.x, part.x);
+      bb.y = Math.min(bb.y, part.y);
+      bb.width = right - bb.x;
+      bb.height = bottom - bb.y;
+    }
+  }
+  if (!bb) return;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return;
+  const p1 = new DOMPoint(bb.x, bb.y).matrixTransform(ctm);
+  const p2 = new DOMPoint(bb.x + bb.width, bb.y + bb.height).matrixTransform(ctm);
+  const visible = p2.right >= 0 && p1.left <= window.innerWidth && p2.bottom >= 0 && p1.top <= window.innerHeight;
+  if (!visible) frameBBoxIntoView(bb);
 }
 let drag = null;
 svg.addEventListener("mousedown", (e) => {
@@ -767,60 +822,93 @@ function elGroup(elementId, z, root = content) {
 
 // ---------- 笔画播放 + 钢笔跟随 ----------
 let totalStrokes = 0;
-let queue = Promise.resolve();
+let queue = Promise.resolve(); // 回放和静默刷新使用的保留队列
 let wipeSeq = 0;
+let canvasEpoch = 0;
+const WORKER_IDS = ["worker-1", "worker-2", "worker-3", "worker-4"];
 
-/** 笔尖当前位置（画布坐标），用于笔画间的抬笔滑行 */
-let penPos = null;
-/** 蚂蚁位置节流：上一帧蚂蚁所在坐标，与 penPos 比较，变化>4 才重写 transform（避免每帧写入） */
-let lastAntTarget = { x: NaN, y: NaN };
+/** 每只工蚁拥有独立笔尖、目标位置和动画队列；队列空闲后自动领取下一批笔画。 */
+const workerLanes = new Map(WORKER_IDS.map((id) => [id, { queue: Promise.resolve(), penPos: null, lastTarget: { x: NaN, y: NaN }, epoch: 0 }]));
+let penPos = null; // 兼容旧镜头代码；镜头默认不再跟随
+let lastAntTarget = { x: NaN, y: NaN }; // 兼容旧单工蚁状态
+function laneFor(workerId) {
+  return workerLanes.get(workerId) || workerLanes.get("worker-1");
+}
+function workerElFor(workerId) {
+  const existing = workerEls.get(workerId);
+  if (existing) return existing;
+  // WebSocket 可能早于 initAgent() 收到工蚁笔画；此时也必须即时创建对应 DOM，
+  // 不能回退到 worker-1，否则四只工蚁会叠在同一个位置、同一只蚂蚁同时画多块内容。
+  if (typeof ensureWorkerElement === "function") return ensureWorkerElement(workerId);
+  return workerEl;
+}
+function invalidateWorkerLanes() {
+  canvasEpoch++;
+  for (const lane of workerLanes.values()) {
+    lane.epoch++;
+    lane.penPos = null;
+    lane.lastTarget = { x: NaN, y: NaN };
+  }
+}
+function laneIsCurrent(workerId, epoch) {
+  return laneFor(workerId).epoch === epoch;
+}
 
 function movePen(x, y) {
-  penPos = { x, y };
-  // 工作状态下蚂蚁跟随笔尖：节流调用以避免每帧 reflow
-  if (antStatus === "working" && agentMode) {
-    if (!Number.isFinite(lastAntTarget.x) || !Number.isFinite(lastAntTarget.y) ||
-        Math.abs(x - lastAntTarget.x) > 4 || Math.abs(y - lastAntTarget.y) > 4) {
-      lastAntTarget = { x, y };
-      moveAntToPen(x, y);
-    }
+  movePenFor("worker-1", x, y);
+}
+function movePenFor(workerId, x, y) {
+  const lane = laneFor(workerId);
+  lane.penPos = { x, y };
+  if (workerId === "worker-1") penPos = lane.penPos;
+  // 每只工蚁独立跟随笔尖；不再驱动摄像机。
+  if (agentMode && (!Number.isFinite(lane.lastTarget.x) || !Number.isFinite(lane.lastTarget.y) ||
+      Math.abs(x - lane.lastTarget.x) > 4 || Math.abs(y - lane.lastTarget.y) > 4)) {
+    lane.lastTarget = { x, y };
+    moveAntToPenFor(workerId, x, y);
   }
 }
 
 /** 工作态中等蚂蚁的 CSS 跟随过渡结束，确保它先落到笔画起点再下笔。 */
 function waitForAntArrival(to) {
-  if (antStatus !== "working" || !agentMode) return Promise.resolve();
-  // 最后一帧强制写入精确落点，留出一次短暂落笔缓冲即可。
-  lastAntTarget = { x: to.x, y: to.y };
-  moveAntToPen(to.x, to.y);
-  return new Promise((resolve) => setTimeout(resolve, 80));
+  return waitForAntArrivalFor("worker-1", to);
+}
+function waitForAntArrivalFor(workerId, to) {
+  if (!agentMode) return Promise.resolve();
+  const lane = laneFor(workerId);
+  lane.lastTarget = { x: to.x, y: to.y };
+  moveAntToPenFor(workerId, to.x, to.y);
+  return new Promise((resolve) => setTimeout(resolve, 36));
 }
 
 /** 抬笔滑行：从当前位置平滑移到下一笔起点；工作态必须等蚂蚁抵达后才开始画。 */
 function glidePen(to) {
-  const from = penPos;
+  return glidePenFor("worker-1", to);
+}
+function glidePenFor(workerId, to) {
+  const from = laneFor(workerId).penPos;
   if (!from) {
-    movePen(to.x, to.y);
-    return waitForAntArrival(to);
+    movePenFor(workerId, to.x, to.y);
+    return waitForAntArrivalFor(workerId, to);
   }
   const dist = Math.hypot(to.x - from.x, to.y - from.y);
   if (dist < 24) {
-    movePen(to.x, to.y);
-    return waitForAntArrival(to);
+    movePenFor(workerId, to.x, to.y);
+    return waitForAntArrivalFor(workerId, to);
   }
   // 画画蚂蚁的抬笔移动稍慢一点，给用户清晰的“移动 → 落笔”节奏。
-  const dur = Math.min(300, 75 + dist * 0.30);
+  const dur = Math.min(150, 40 + dist * 0.15);
   const startT = performance.now();
   return new Promise((resolve) => {
     function frame(now) {
       const t = Math.min(1, (now - startT) / dur);
       const e = 1 - Math.pow(1 - t, 3);
-      movePen(from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e);
+      movePenFor(workerId, from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e);
       if (t < 1) {
         requestAnimationFrame(frame);
       } else {
         // 先准确落位，再等待蚂蚁完成最后一小段追随。
-        waitForAntArrival(to).then(resolve);
+        waitForAntArrivalFor(workerId, to).then(resolve);
       }
     }
     requestAnimationFrame(frame);
@@ -830,8 +918,11 @@ function glidePen(to) {
 function svgNS(tag) { return document.createElementNS("http://www.w3.org/2000/svg", tag); }
 
 /** 播放单个笔画（写出来 + 钢笔跟随） */
-async function playStroke(s) {
-  const dur = Math.max(80, s.dur || 300);
+async function playStroke(s, workerId = "worker-1", epoch = laneFor(workerId).epoch) {
+  if (!laneIsCurrent(workerId, epoch)) return false;
+  // turbo 笔画会下发 26ms；以 40ms 作为浏览器可见动画下限，
+  // 同时配合更短的落笔/抬笔节奏，中文逐笔画总时长约为旧版的一半。
+  const dur = Math.max(40, s.dur || 300);
   const group = elGroup(s.elementId, s.z);
   // 字体文字（拉丁/符号）：擦除式显出——从左到右揭开，笔尖跟着写出前沿走，
   // 保留原字体的美观，又不像淡入那样"跳出来"
@@ -853,24 +944,26 @@ async function playStroke(s) {
     group.appendChild(clip);
     g.setAttribute("clip-path", `url(#${clipId})`);
 
-    const wipeDur = Math.max(80, dur);
+    const wipeDur = Math.max(40, dur);
     const startX = bb.x - pad;
     const full = bb.width + pad * 2;
     const penY = bb.y + bb.height * 0.72; // 笔尖贴在基线附近
     // 等蚂蚁抵达文字起点后，才开始揭开文字。
-    await glidePen({ x: startX, y: penY });
+    await glidePenFor(workerId, { x: startX, y: penY });
+    if (!laneIsCurrent(workerId, epoch)) { group.remove(); return false; }
     const startT = performance.now();
     return new Promise((resolve) => {
       function frame(now) {
+        if (!laneIsCurrent(workerId, epoch)) { group.remove(); resolve(false); return; }
         const t = Math.min(1, (now - startT) / wipeDur);
         rect.setAttribute("width", String(full * t));
-        movePen(startX + full * t, penY);
+        movePenFor(workerId, startX + full * t, penY);
         if (t < 1) {
           requestAnimationFrame(frame);
         } else {
           g.removeAttribute("clip-path"); // 显完去掉裁剪，不留残留节点
           clip.remove();
-          resolve();
+          resolve(true);
         }
       }
       requestAnimationFrame(frame);
@@ -890,11 +983,14 @@ async function playStroke(s) {
     p.style.strokeDasharray = hlen;
     p.style.strokeDashoffset = hlen;
     // 填充斜线没有逐段笔尖轨迹，也仍需等蚂蚁先抵达该组笔画的起点。
-    await glidePen(p.getPointAtLength(0));
-    const hatchDur = Math.max(80, dur);
+    await glidePenFor(workerId, p.getPointAtLength(0));
+    if (!laneIsCurrent(workerId, epoch)) { group.remove(); return false; }
+    const hatchDur = Math.max(40, dur);
     p.style.transition = `stroke-dashoffset ${hatchDur}ms ease-out`;
     requestAnimationFrame(() => { p.style.strokeDashoffset = "0"; });
-    return new Promise(r => setTimeout(r, hatchDur));
+    return new Promise((resolve) => setTimeout(() => {
+      if (!laneIsCurrent(workerId, epoch)) { group.remove(); resolve(false); } else resolve(true);
+    }, hatchDur));
   }
   if (s.fill) {
     // 填充图形（箭头尖）：淡入
@@ -903,11 +999,14 @@ async function playStroke(s) {
     p.style.opacity = "0";
     group.appendChild(p);
     // 箭头尖等填充元素也遵守“先到位、后落笔”的节奏。
-    if (p.getTotalLength() > 0) await glidePen(p.getPointAtLength(0));
-    const fillDur = Math.max(80, dur);
+    if (p.getTotalLength() > 0) await glidePenFor(workerId, p.getPointAtLength(0));
+    if (!laneIsCurrent(workerId, epoch)) { group.remove(); return false; }
+    const fillDur = Math.max(40, dur);
     p.style.transition = `opacity ${fillDur}ms`;
     requestAnimationFrame(() => { p.style.opacity = "1"; });
-    return new Promise(r => setTimeout(r, fillDur));
+    return new Promise((resolve) => setTimeout(() => {
+      if (!laneIsCurrent(workerId, epoch)) { group.remove(); resolve(false); } else resolve(true);
+    }, fillDur));
   }
   p.setAttribute("fill", "none");
   p.setAttribute("stroke", s.color);
@@ -920,22 +1019,24 @@ async function playStroke(s) {
   p.style.strokeDashoffset = len;
 
   // 先抬笔滑行到本笔起点并等蚂蚁落笔，再启动真实笔画的出现动画。
-  await glidePen(p.getPointAtLength(0));
-  const drawDur = Math.max(80, dur);
+  await glidePenFor(workerId, p.getPointAtLength(0));
+  if (!laneIsCurrent(workerId, epoch)) { group.remove(); return false; }
+  const drawDur = Math.max(40, dur);
   p.style.transition = `stroke-dashoffset ${drawDur}ms linear`;
   requestAnimationFrame(() => { p.style.strokeDashoffset = "0"; });
 
   const startT = performance.now();
   return new Promise((resolve) => {
     function frame(now) {
+      if (!laneIsCurrent(workerId, epoch)) { group.remove(); resolve(false); return; }
       const t = Math.min(1, (now - startT) / drawDur);
       const pt = p.getPointAtLength(len * t);
-      movePen(pt.x, pt.y);
+      movePenFor(workerId, pt.x, pt.y);
       if (t < 1) {
         requestAnimationFrame(frame);
       } else {
         p.style.strokeDashoffset = 0;
-        resolve();
+        resolve(true);
       }
     }
     requestAnimationFrame(frame);
@@ -980,20 +1081,23 @@ function drawStrokeInstant(s, root = content) {
 }
 
 function renderInstant(strokes) {
-  // 重连时服务器会重放全量历史，先清空避免重复叠加
+  // 重连时服务器会重放全量历史，先清空避免重复叠加。
+  // 静态恢复不应让工作队列的 epoch 失效，否则恢复后的新笔画会被整批跳过。
   strokeSeq++;
   content.innerHTML = "";
   totalStrokes = 0;
   for (const s of strokes) drawStrokeInstant(s);
   progEl.textContent = totalStrokes + tr("strokeUnit");
   penPos = null;
+  // 首次恢复时若已有内容不在当前视口，再把镜头带过去；用户已有的可见视角不被覆盖。
+  requestAnimationFrame(() => frameIncomingElementsIntoView(strokes));
 }
 
 // ---------- 动画回放：按原始书写时长把全量笔画重新播放一遍 ----------
 let replaying = false;
 async function replayCanvas() {
   if (replaying) return;
-  if (document.body.classList.contains("agent-working")) { labelEl.textContent = tr("replayBusy"); return; }
+  if (document.body.classList.contains("agent-working") || drawingJobs > 0) { labelEl.textContent = tr("replayBusy"); return; }
   let strokes;
   try {
     const res = await fetch("/api/strokes?board=" + encodeURIComponent(board));
@@ -1003,6 +1107,7 @@ async function replayCanvas() {
   } catch { return; }
   replaying = true;
   beginDrawing();
+  invalidateWorkerLanes();
   strokeSeq++; // 让进行中的静默刷新失效，避免把回放冲掉
   deselect();
   content.innerHTML = "";
@@ -1010,17 +1115,20 @@ async function replayCanvas() {
   penPos = null;
   progEl.textContent = "0" + tr("strokeUnit");
   // 排在当前队列后面：正在播放的笔画播完再开始回放
+  const replayEpoch = canvasEpoch;
   queue = queue.then(async () => {
     controlsEl.classList.add("dim");
     try {
       for (const s of strokes) {
+        if (canvasEpoch !== replayEpoch) return;
         showObjectDescription(s);
         if (s.image) { drawStrokeInstant(s); continue; } // 图片直接出现
         totalStrokes++;
         progEl.textContent = totalStrokes + tr("strokeUnit");
         labelEl.textContent = "▶ " + (s.label || tr("replaying"));
         showObjectDescription(s);
-        await playStroke(s);
+        const replayWorkerId = WORKER_IDS.includes(s.workerId) ? s.workerId : "worker-1";
+        await playStroke(s, replayWorkerId, laneFor(replayWorkerId).epoch);
       }
       labelEl.textContent = tr("replayDone");
       penPos = null;
@@ -1198,6 +1306,8 @@ async function silentRefresh() {
 let drawingJobs = 0;
 let shownDescriptionFor = null;
 let streamingObjectDesc = false;
+// 收集一轮异步绘图新增的元素，工蚁全部完成后一次性把整批内容带入视野，避免逐个区域跳镜头。
+const incomingElementIds = new Set();
 function beginDrawing() {
   drawingJobs++;
   if (agentMode) setAntStatus("working");
@@ -1205,7 +1315,9 @@ function beginDrawing() {
 function showObjectDescription(s) {
   if (!agentMode || !s.desc || shownDescriptionFor === s.elementId) return;
   shownDescriptionFor = s.elementId;
-  streamObjectDescription(s.desc);
+  // 描述与产生该元素的 worker 绑定；每只工蚁独立气泡，desc 贴在那只工蚁旁边。
+  const descWorkerId = WORKER_IDS.includes(s.workerId) ? s.workerId : "worker-1";
+  streamObjectDescription(s.desc, descWorkerId);
 }
 /** 当前队列完成后立即收起对象说明；agent 仍在思考时不会循环展示聊天文本。 */
 function finishDrawingIfIdle() {
@@ -1214,37 +1326,68 @@ function finishDrawingIfIdle() {
   shownDescriptionFor = null;
   // 不截断仍在逐字输出的 desc；它完成后会自行收起。
   if (streamingObjectDesc) return;
-  // 队列结束时当前 speech 是工蚁；不能调用 hideSpeech()，否则会停止蚁后的循环提示。
-  workerSpeechEl.hidden = true;
+  // 队列结束时所有工蚁气泡都收；hideSpeech() 会停蚁后，不能调。
+  hideAllWorkerSpeeches();
   if (!replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
 }
 function handleStrokes(strokes) {
+  for (const stroke of strokes) if (stroke.elementId) incomingElementIds.add(stroke.elementId);
   strokeSeq++;
   beginDrawing();
-  queue = queue.then(async () => {
-    controlsEl.classList.add("dim");
-    try {
-      for (const s of strokes) {
-        if (s.image) {
+  const byWorker = new Map();
+  for (const stroke of strokes) {
+    const id = WORKER_IDS.includes(stroke.workerId) ? stroke.workerId : "worker-1";
+    if (!byWorker.has(id)) byWorker.set(id, []);
+    byWorker.get(id).push(stroke);
+  }
+  const jobs = [];
+  for (const [workerId, laneStrokes] of byWorker) {
+    const lane = laneFor(workerId);
+    const epoch = lane.epoch;
+    lane.queue = lane.queue.then(async () => {
+      workerElFor(workerId).classList.add("busy");
+      try {
+        if (!laneIsCurrent(workerId, epoch)) return;
+        for (const s of laneStrokes) {
+          if (!laneIsCurrent(workerId, epoch)) return;
+          if (s.image) {
+            showObjectDescription(s);
+            drawStrokeInstant(s);
+            continue;
+          }
+          totalStrokes++;
+          progEl.textContent = totalStrokes + tr("strokeUnit");
+          labelEl.textContent = `✏️ ${s.label || "绘制"} · ${workerId}`;
           showObjectDescription(s);
-          drawStrokeInstant(s);
-          continue;
+          await playStroke(s, workerId, epoch);
         }
-        totalStrokes++;
-        progEl.textContent = totalStrokes + tr("strokeUnit");
-        labelEl.textContent = "✏️ " + (s.label || "绘制");
-        showObjectDescription(s);
-        await playStroke(s);
+      } finally {
+        workerElFor(workerId).classList.remove("busy");
       }
-      labelEl.textContent = tr("batchDone");
-    } finally {
-      controlsEl.classList.remove("dim");
-      finishDrawingIfIdle();
+    });
+    jobs.push(lane.queue);
+  }
+  Promise.all(jobs).then(() => {
+    labelEl.textContent = tr("batchDone");
+    // 先递减 drawingJobs；只有整轮异步绘图都结束后，才一次性定位到新增内容。
+    finishDrawingIfIdle();
+    if (drawingJobs === 0 && incomingElementIds.size) {
+      const ids = [...incomingElementIds].map((elementId) => ({ elementId }));
+      incomingElementIds.clear();
+      requestAnimationFrame(() => frameIncomingElementsIntoView(ids));
+    }
+  }).catch(() => {
+    finishDrawingIfIdle();
+    if (drawingJobs === 0 && incomingElementIds.size) {
+      const ids = [...incomingElementIds].map((elementId) => ({ elementId }));
+      incomingElementIds.clear();
+      requestAnimationFrame(() => frameIncomingElementsIntoView(ids));
     }
   });
 }
 
 function clearCanvas() {
+  invalidateWorkerLanes();
   strokeSeq++;
   content.innerHTML = "";
   totalStrokes = 0;
@@ -1408,7 +1551,25 @@ function connect() {
         return;
       }
       if (msg.type === "speech") {
-        // 蚂蚁不显示 agent 的聊天/思考输出，只在实际画对象时展示该对象 desc 元数据。
+        // text 默认是蚁后流；带 workerId 则路由到该工蚁独立气泡。
+        const kind = msg.kind === "thinking" ? "thinking" : "text";
+        if (msg.workerId && WORKER_IDS.includes(msg.workerId)) {
+          showWorkerStream(msg.workerId, msg.full ?? "", { kind });
+          if (msg.done) finishWorkerStreamDisplay(msg.workerId);
+        } else {
+          // 蚁后文本流：始终显示在左下角蚁后气泡，不再被工蚁绘图状态覆盖。
+          showQueenStream(msg.full ?? "", { kind });
+          if (msg.done) finishQueenStreamDisplay();
+        }
+        return;
+      }
+      if (msg.type === "workers") {
+        for (const worker of msg.workers || []) {
+          const el = workerElFor(worker.id);
+          el.classList.toggle("busy", worker.status === "drawing" || worker.status === "starting");
+          el.dataset.workerStatus = worker.status;
+          el.dataset.taskId = worker.taskId || "";
+        }
         return;
       }
       elMetaCache = null; // 画布有变动，元素元数据缓存失效
@@ -1475,20 +1636,64 @@ nbName.addEventListener("keydown", (e) => { if (e.key === "Enter") createBoardFr
 // ---------- 蚂蚁助手（待机 / 工作两态） ----------
 const antEl = document.getElementById("ant"); // 蚁后：固定左下角、唯一交互入口
 const antImg = document.getElementById("antImg");
-const workerEl = document.getElementById("worker"); // 工蚁：固定右下角待命，作画时移动
-const workerImg = document.getElementById("workerImg");
+const workerEl = document.getElementById("worker"); // 工蚁 1；其他工蚁在 agent 模式初始化时创建
+// 第一只工蚁的图片；其他工蚁由 ensureWorkerElements() 动态创建并各自持有图片。
+const workerImg = workerEl.querySelector("img");
+const workerEls = new Map([["worker-1", workerEl]]);
+function ensureWorkerElement(id) {
+  const existing = workerEls.get(id);
+  if (existing) return existing;
+  const el = document.createElement("div");
+  el.id = id;
+  el.className = "worker-ant";
+  el.setAttribute("aria-label", `作画工蚁 ${id.slice(-1)}`);
+  el.hidden = true;
+  const img = document.createElement("img");
+  img.alt = `worker ant ${id.slice(-1)}`;
+  img.draggable = false;
+  img.src = ANT_IMG.working;
+  el.appendChild(img);
+  document.querySelector(".stage").appendChild(el);
+  workerEls.set(id, el);
+  return el;
+}
+function ensureWorkerElements() {
+  for (const id of WORKER_IDS.slice(1)) ensureWorkerElement(id);
+}
 const queenSpeechEl = document.getElementById("queenSpeech");
-const workerSpeechEl = document.getElementById("workerSpeech");
+/** 工蚁独立气泡：每个 worker-1..4 拥有自己的 DOM，在收到带 workerId 的 speech 时创建。 */
+const workerSpeechEls = new Map();
+function workerSpeechElFor(workerId) {
+  const key = WORKER_IDS.includes(workerId) ? workerId : "worker-1";
+  let el = workerSpeechEls.get(key);
+  if (el) return el;
+  el = document.getElementById(`${key}-speech`);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = `${key}-speech`;
+    el.className = "empty worker-speech";
+    el.setAttribute("aria-live", "polite");
+    el.hidden = true;
+    el.innerHTML = '<div class="b-tail"></div><div class="b-body"></div>';
+    document.querySelector(".stage").appendChild(el);
+  }
+  workerSpeechEls.set(key, el);
+  return el;
+}
+/** 遗留兼容：worker-1 主气泡放在 workerSpeechEl；新代码全部走 workerSpeechElFor(workerId)。 */
+const workerSpeechEl = workerSpeechElFor("worker-1");
 let speechEl = queenSpeechEl;
 let speechBody = speechEl.querySelector(".b-body");
 let speechTail = speechEl.querySelector(".b-tail");
 let speechAnchor = antEl;
-function useSpeech(anchor, bubble) {
+let speechWorkerId = null;
+function useSpeech(anchor, bubble, workerId = null) {
   // 两只蚂蚁各自保有气泡：切换当前写入目标时不隐藏另一只的提示。
   speechAnchor = anchor;
   speechEl = bubble;
   speechBody = bubble.querySelector(".b-body");
   speechTail = bubble.querySelector(".b-tail");
+  speechWorkerId = workerId;
 }
 const inputPop = document.getElementById("inputPop");
 const inputText = document.getElementById("inputText");
@@ -1508,6 +1713,72 @@ let agentMode = false;
 let agentWorking = false;
 /** 发送聊天消息防重入 */
 let chatBusy = false;
+/** 蚁后真实回复流：独立于工蚁对象 desc，避免 setAntStatus 切换时丢失。 */
+let queenStreamText = "";
+let queenStreamHideTimer = null;
+function showQueenStream(text, opts = {}) {
+  const { kind = "text" } = opts;
+  if (!text) {
+    // pi 可能先广播空的 speech/full；空文本不能把蚁后的初始思考提示留在隐藏状态。
+    if (agentWorking && antStatus === "thinking" && inputPop.hidden && historyPop.hidden) startThinkingTyping();
+    return;
+  }
+  stopThinkingTyping();
+  stopIdleTyping();
+  queenStreamText = text;
+  if (queenStreamHideTimer) clearTimeout(queenStreamHideTimer);
+  queenSpeechEl.classList.remove("idle", "empty");
+  // thinking 用灰斜体提示区别于 final text；收到真 text 后会被覆盖。
+  queenSpeechEl.classList.toggle("thinking", kind === "thinking");
+  queenSpeechEl.hidden = false;
+  queenSpeechEl.querySelector(".b-body").textContent = text;
+  requestAnimationFrame(() => positionBubble(antEl, queenSpeechEl));
+}
+function finishQueenStreamDisplay() {
+  if (queenStreamHideTimer) clearTimeout(queenStreamHideTimer);
+  queenStreamHideTimer = setTimeout(() => {
+    if (agentWorking || drawingJobs > 0) return;
+    queenStreamText = "";
+    if (antStatus === "idle") startIdleTyping();
+  }, 5000);
+}
+
+/** 工蚁独立气泡打字器：每只工蚁一套 token，避免思考/文本互相覆盖。 */
+const workerStreamTokens = new Map();
+const workerStreamHideTimers = new Map();
+const workerStreamTexts = new Map();
+function showWorkerStream(workerId, text, opts = {}) {
+  const { kind = "text" } = opts;
+  const bubble = workerSpeechElFor(workerId);
+  const body = bubble.querySelector(".b-body");
+  const ant = workerElFor(workerId);
+  if (!text) return;
+  // 换写入目标时，切到该工蚁气泡；其他工蚁气泡保留原状，互不抢占。
+  useSpeech(ant, bubble, workerId);
+  bubble.classList.remove("empty", "idle");
+  bubble.classList.toggle("thinking", kind === "thinking");
+  bubble.hidden = false;
+  body.textContent = text;
+  requestAnimationFrame(() => positionBubble(ant, bubble));
+}
+function finishWorkerStreamDisplay(workerId) {
+  const prev = workerStreamHideTimers.get(workerId);
+  if (prev) clearTimeout(prev);
+  workerStreamHideTimers.set(
+    workerId,
+    setTimeout(() => {
+      workerStreamTexts.delete(workerId);
+      workerStreamHideTimers.delete(workerId);
+    }, 5000)
+  );
+}
+/** 收起所有工蚁气泡：作画状态不应被某只工蚁历史气泡遮住；具体某一只是谁靠 stroke workerId 判断。 */
+function hideAllWorkerSpeeches() {
+  for (const id of WORKER_IDS) {
+    const el = workerSpeechEls.get(id) || document.getElementById(`${id}-speech`);
+    if (el) el.hidden = true;
+  }
+}
 /** 蚂蚁当前是击键事件还是双击（<300ms） */
 let antClickT = 0;
 let antClickTimeout = null;
@@ -1538,7 +1809,13 @@ const ANT_SIZE = 66;
 const ANT_PEN_TIP_RATIO = { x: 0.802, y: 0.527 };
 
 function setAntStatus(status, { force = false } = {}) {
-  if (!force && antStatus === status) return;
+  // 同一状态的重复广播也要负责自愈：初始化竞态或打开浮窗可能让气泡被隐藏、定时器丢失。
+  if (!force && antStatus === status) {
+    const speechNeedsRecovery = status === "thinking"
+      ? (queenSpeechEl.hidden || !thinkingTypingTimer)
+      : status === "idle" && (queenSpeechEl.hidden || (!idleTypingTimer && !queenStreamText));
+    if (!speechNeedsRecovery || !agentMode || !inputPop.hidden || !historyPop.hidden) return;
+  }
   antStatus = status;
   // 三个气泡互斥：思考/作画时关闭输入与历史。
   if (status === "working") {
@@ -1548,36 +1825,45 @@ function setAntStatus(status, { force = false } = {}) {
     resetAgentTyping();
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
-    useSpeech(workerEl, workerSpeechEl);
+    // 画画蚂蚁是唯一的书写指示器；收起所有工蚁气泡但保留蚁后的思考/回复独立常驻。
+    hideAllWorkerSpeeches();
     workerImg.src = ANT_IMG.working;
     workerEl.classList.add("busy", "flip-off");
-    // 画画蚂蚁是唯一的书写指示器；只收起工蚁气泡，不能停止蚁后的独立循环提示。
-    workerSpeechEl.hidden = true;
     if (penPos) moveAntToPen(penPos.x, penPos.y);
   } else if (status === "thinking") {
-    // 蚁后的入口提示独立循环；工蚁思考时不能中断它。
+    // 从待机切到思考时，停止待机提示的旧定时器，再由蚁后播放“思考中…”。
+    stopIdleTyping();
     resetAgentTyping();
     closeInputPop({ restoreSpeech: false });
     closeHistoryPop({ restoreSpeech: false });
-    // 思考的是工蚁：保留工蚁形象，但原地停下，不进入笔画/镜头跟随。
-    useSpeech(workerEl, workerSpeechEl);
-    workerImg.src = ANT_IMG.working;
-    workerEl.classList.add("busy", "flip-off");
-    // 停止镜头惯性，避免工蚁静止思考时摄像机仍继续抢视角。
-    camera.stop();
-    startThinkingTyping();
-  } else {
-    stopThinkingTyping();
-    resetAgentTyping();
-    // 状态离开工蚁后，必须收起它自己的气泡；当前 speech 已切到蚁后时，
-    // 不能再通过 hideSpeech() 间接操作，否则会留下“思考中…”卡在右下角。
-    workerSpeechEl.hidden = true;
     useSpeech(antEl, queenSpeechEl);
     workerImg.src = ANT_IMG.working;
     workerEl.classList.remove("busy", "flip-off");
     moveWorkerToCorner();
-    // 回合结束后回到待机提示；提示只弹出、逐字播放一次，不循环。
-    startIdleTyping();
+    camera.stop();
+    // 如果已有蚁后真实回复流，不覆盖它；否则启动思考提示。
+    if (!queenStreamText) startThinkingTyping();
+  } else {
+    stopThinkingTyping();
+    resetAgentTyping();
+    // 状态离开工蚁后，必须收起所有工蚁气泡；当前 speech 已切到蚁后时，
+    // 不能再通过 hideSpeech() 间接操作，否则会留下“思考中…”卡在右下角。
+    hideAllWorkerSpeeches();
+    useSpeech(antEl, queenSpeechEl);
+    workerImg.src = ANT_IMG.working;
+    workerEl.classList.remove("busy", "flip-off");
+    moveWorkerToCorner();
+    // 如果刚收到蚁后最终回复，先保留真实回复，不要立即被待机提示覆盖。
+    if (queenStreamText) {
+      showQueenStream(queenStreamText);
+      if (queenStreamHideTimer) clearTimeout(queenStreamHideTimer);
+      queenStreamHideTimer = setTimeout(() => {
+        queenStreamText = "";
+        if (antStatus === "idle") startIdleTyping();
+      }, 5000);
+    } else {
+      startIdleTyping();
+    }
   }
 }
 
@@ -1596,9 +1882,15 @@ function placeQueenAt(left, top) {
   antEl.style.transform = `translate(${left}px, ${top}px)`;
 }
 function placeWorkerAt(left, top) {
-  workerEl.style.setProperty("--ant-x", left.toFixed(1) + "px");
-  workerEl.style.setProperty("--ant-y", top.toFixed(1) + "px");
-  workerEl.style.transform = `translate(${left}px, ${top}px)`;
+  placeWorkerElementAt(workerEl, left, top);
+}
+function moveAllWorkersToCorners() {
+  const margin = 20;
+  for (const [index, id] of WORKER_IDS.entries()) {
+    const el = workerElFor(id);
+    // 预留完整蚂蚁宽度 + 22px 间距，避免四只工蚁的阴影/过渡区域互相盖住。
+    placeWorkerElementAt(el, window.innerWidth - ANT_SIZE - margin - index * (ANT_SIZE + 22), window.innerHeight - ANT_SIZE - margin);
+  }
 }
 
 /** 蚂蚁移动/过渡期间每帧同步气泡位置，确保气泡始终贴着蚂蚁而非停在上一个落点。 */
@@ -1622,9 +1914,7 @@ function moveQueenToCorner() {
   if (!queenSpeechEl.hidden) requestAnimationFrame(() => positionBubble(antEl, queenSpeechEl));
 }
 function moveWorkerToCorner() {
-  camera.stop();
-  const margin = 20;
-  placeWorkerAt(window.innerWidth - ANT_SIZE - margin, window.innerHeight - ANT_SIZE - margin);
+  moveAllWorkersToCorners();
   if (speechAnchor === workerEl) scheduleBubbleAfterMove();
 }
 
@@ -1639,12 +1929,22 @@ function syncWorkerScreenPosition() {
   if (speechAnchor === workerEl) scheduleBubbleAfterMove();
 }
 
-/** 工作位置：蚂蚁笔尖对准当前笔画点，同时把该工蚁置于摄像机中心。 */
+/** 工作位置：蚂蚁笔尖对准当前笔画点；多工蚁模式不自动接管摄像机。 */
 function moveAntToPen(svgX, svgY) {
-  // 先保存工蚁的世界坐标。camera 每帧改变 viewBox 后会调用 syncWorkerScreenPosition。
-  penPos = { x: svgX, y: svgY };
-  camera.follow(penPos);
-  syncWorkerScreenPosition();
+  moveAntToPenFor("worker-1", svgX, svgY);
+}
+function moveAntToPenFor(workerId, svgX, svgY) {
+  const lane = laneFor(workerId);
+  lane.penPos = { x: svgX, y: svgY };
+  if (workerId === "worker-1") penPos = lane.penPos;
+  const screen = svgToScreen(svgX, svgY);
+  const el = workerElFor(workerId);
+  placeWorkerElementAt(el, screen.x - ANT_PEN_TIP_RATIO.x * ANT_SIZE, screen.y - ANT_PEN_TIP_RATIO.y * ANT_SIZE);
+}
+function placeWorkerElementAt(el, left, top) {
+  el.style.setProperty("--ant-x", left.toFixed(1) + "px");
+  el.style.setProperty("--ant-y", top.toFixed(1) + "px");
+  el.style.transform = `translate(${left}px, ${top}px)`;
 }
 
 /** 气泡跟随：放在蚂蚁右上角外侧，尾巴指向蚂蚁中心 */
@@ -1707,20 +2007,20 @@ function stopThinkingTyping() {
 function startThinkingTyping() {
   stopThinkingTyping();
   if (!agentMode || antStatus !== "thinking" || !inputPop.hidden || !historyPop.hidden) return;
-  // 捕获工蚁自己的节点，避免状态切换时全局 speech 指针改到蚁后，旧定时器误写错气泡。
-  const bubble = workerSpeechEl;
+  // 思考气泡属于蚁后，和工蚁对象说明气泡完全分离。
+  const bubble = queenSpeechEl;
   const body = bubble.querySelector(".b-body");
   const token = thinkingTypingToken;
   const fullText = tr("antWorkingEmpty");
   bubble.classList.remove("idle", "empty");
   bubble.hidden = false;
   body.textContent = "";
-  requestAnimationFrame(() => { positionBubble(workerEl, bubble); popFromAnt(bubble); });
+  requestAnimationFrame(() => { positionBubble(antEl, bubble); popFromAnt(bubble); });
   let index = 0;
   const typeNext = () => {
     if (token !== thinkingTypingToken || antStatus !== "thinking") return;
     body.textContent = fullText.slice(0, ++index);
-    positionBubble(workerEl, bubble);
+    positionBubble(antEl, bubble);
     if (index < fullText.length) {
       thinkingTypingTimer = setTimeout(typeNext, 130);
     } else {
@@ -1744,14 +2044,18 @@ function resetAgentTyping() {
  * 工蚁只流式说当前对象的 desc 元数据。文字写完后若没有新的对象说明，短暂停留再自动收起。
  * 新对象一到会取消旧的打字/隐藏定时器，并从蚂蚁身边重新弹出。
  */
-function streamObjectDescription(text) {
+function streamObjectDescription(text, workerId = "worker-1") {
   resetAgentTyping();
   // 仅操作工蚁气泡，蚁后的等待提示保持独立运行。
   const token = agentTypingToken;
   agentTargetText = text;
   streamingObjectDesc = true;
-  speechEl.classList.remove("idle", "empty");
-  speechEl.hidden = false;
+  // 切到该工蚁独立气泡：使用 useSpeech 同步全局 anchor/body 以保证 positionBubble 贴该蚂蚁。
+  const bubble = workerSpeechElFor(workerId);
+  const ant = workerElFor(workerId);
+  useSpeech(ant, bubble, workerId);
+  bubble.classList.remove("idle", "empty");
+  bubble.hidden = false;
   speechBody.textContent = "";
   requestAnimationFrame(() => { positionBubble(); popFromAnt(speechEl); });
 
@@ -1763,8 +2067,8 @@ function streamObjectDescription(text) {
       agentHideTimer = setTimeout(() => {
         if (token !== agentTypingToken || agentVisibleText.length < agentTargetText.length) return;
         streamingObjectDesc = false;
-        // 只收起工蚁说明；hideSpeech() 会停止蚁后的待机打字循环，不能在这里调用。
-        workerSpeechEl.hidden = true;
+        // 只收起该工蚁说明；hideSpeech() 会停止蚁后的待机打字循环，不能在这里调用。
+        bubble.hidden = true;
         // 若 agent 已结束、笔画也播完，再退出作画姿态；否则保持工蚁待命但不显示气泡。
         if (drawingJobs === 0 && !replaying && agentMode) setAntStatus(agentWorking ? "thinking" : "idle");
       }, 650);
@@ -1776,9 +2080,9 @@ function streamObjectDescription(text) {
     speechBody.scrollTop = speechBody.scrollHeight;
     positionBubble();
     // 对象说明采用清晰、可读的逐字节奏；标点处留出更明显的停顿。
-    agentTypingTimer = setTimeout(writeNext, /[。！？.!?，、；：\n]/.test(char) ? 220 : 88);
+    agentTypingTimer = setTimeout(writeNext, /[。！？.!?，、；：\n]/.test(char) ? 110 : 44);
   };
-  agentTypingTimer = setTimeout(writeNext, 40);
+  agentTypingTimer = setTimeout(writeNext, 20);
 }
 /** 待机提示：从蚁后身边逐字播放，短暂停留后循环，直到用户打开输入或历史浮窗。 */
 function startIdleTyping() {
@@ -1837,7 +2141,7 @@ function restoreIdleSpeech() {
 /** 点击蚂蚁 -> 输入浮窗；双击 -> 历史浮窗 */
 antEl.addEventListener("click", (e) => {
   e.stopPropagation();
-  if (!agentMode || antStatus === "working") return;
+  if (!agentMode) return;
   // 双击的第一击会先以 click 出现在这里， 二次击才会出双击事件。 以 280ms 延迟区分：
   if (antClickTimeout) { clearTimeout(antClickTimeout); antClickTimeout = null; }
   antClickT = Date.now();
@@ -1848,7 +2152,7 @@ antEl.addEventListener("click", (e) => {
 });
 antEl.addEventListener("dblclick", (e) => {
   e.stopPropagation();
-  if (!agentMode || antStatus === "working") return;
+  if (!agentMode) return;
   if (antClickTimeout) { clearTimeout(antClickTimeout); antClickTimeout = null; }
   openHistoryPop();
 });
@@ -1940,7 +2244,7 @@ function positionHistoryPop() {
   setPopPosition(historyPop, left, top, rect.left + rect.width / 2, rect.top + rect.height / 2);
 }
 async function openHistoryPop() {
-  if (!agentMode || antStatus === "working") return;
+  if (!agentMode) return;
   // 输入、历史和提示气泡互斥。
   closeInputPop({ restoreSpeech: false });
   hideSpeech();
@@ -1961,8 +2265,14 @@ async function openHistoryPop() {
     } else {
       for (const m of msgs) {
         const div = document.createElement("div");
-        div.className = "msg " + (m.role === "user" ? "user" : "agent");
-        div.textContent = m.content;
+        div.className = "msg " + (m.role || "agent");
+        const role = document.createElement("span");
+        role.className = "msg-role";
+        role.textContent = m.role === "user" ? "用户" : m.role === "agent" ? "蚁后" : m.role === "worker" ? "工蚁调度" : "系统";
+        div.appendChild(role);
+        const body = document.createElement("span");
+        body.textContent = m.content || (m.role === "agent" ? "思考中…" : "（处理中）");
+        div.appendChild(body);
         historyMsgs.appendChild(div);
       }
       historyMsgs.scrollTop = historyMsgs.scrollHeight;
@@ -2004,12 +2314,22 @@ async function initAgent() {
     if (!info.ok) return;
     agentMode = true;
     antEl.hidden = false;
-    workerEl.hidden = false;
-    // 蚁后和工蚁从启动起始终可见：分别固定在左右下角。
+    ensureWorkerElements();
+    for (const el of workerEls.values()) el.hidden = false;
+    fetch("/api/workers?board=" + encodeURIComponent(board)).then((res) => res.json()).then((data) => {
+      for (const worker of data.workers || []) {
+        const el = workerElFor(worker.id);
+        el.classList.toggle("busy", worker.status === "drawing" || worker.status === "starting");
+        el.dataset.workerStatus = worker.status;
+        el.dataset.taskId = worker.taskId || "";
+      }
+    }).catch(() => {});
+    // 蚁后和四个工蚁从启动起始终可见：蚁后左下角，工蚁排在右下角。
     moveQueenToCorner();
     moveWorkerToCorner();
-    // 初始状态由 WebSocket 同步；force 让蚁后提示完成一次渲染。
-    setAntStatus("idle", { force: true });
+    // WebSocket 可能在 agentMode 初始化前就发来 working 状态；这里再次按最新状态同步，
+    // 确保蚁后的初始气泡不会因为竞态而一直隐藏。
+    setAntStatus(agentWorking ? "thinking" : "idle", { force: true });
     // 窗口缩放时保持两只蚂蚁各自的落点；作画中的工蚁仍贴笔尖。
     window.addEventListener("resize", () => {
       moveQueenToCorner();

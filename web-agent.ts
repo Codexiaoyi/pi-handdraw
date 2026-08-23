@@ -17,7 +17,7 @@
  *   HANDDRAW_PI_ARGS         给 pi 后端的额外参数（如 "--model anthropic/claude-sonnet-4-5"）
  *   HANDDRAW_ACP_AUTO_APPROVE 0 = 拒绝 ACP agent 的工具权限请求（默认 1 = 自动批准）
  *   HANDDRAW_AGENT_TIMEOUT_MS 单条消息超时（默认 600000）
- *   端口沿用 HANDDRAW_CANVAS_PORTS（默认 8788~8791）
+ *   固定端口 HANDDRAW_CANVAS_PORT（默认 8788）
  *
  * 运行：
  *   npm run agent                          # 默认 pi
@@ -31,11 +31,11 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { spawn, exec, type ChildProcess } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BOARDS_DIR, DEFAULT_BOARD, getCanvasServer } from "./canvas-server";
+import { BOARDS_DIR, DEFAULT_BOARD, getCanvasServer, isValidBoardName } from "./canvas-server";
 import { setAgentWorking } from "./core";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,10 +48,19 @@ const INIT_TIMEOUT = 180_000; // pi 首次启动加载扩展 / npx 首次下载�
 /** 追加给 agent 的场景说明（pi 用 --append-system-prompt；ACP 后端拼在每条消息前缀里） */
 const SCENARIO_PROMPT =
   "你现在处在一个网页画布聊天场景中：用户通过浏览器页面左侧的聊天框和你对话。" +
-  "你可以使用 handdraw_canvas / handdraw_board 工具在手绘风实时画布上边画边讲，绘制过程用户实时可见。" +
+  "你是蚁后，只负责理解需求、查看画布、整体布局、拆分任务、调用 handdraw_delegate 调度工蚁和最终验收；严禁自己直接绘图或修改画布。" +
+  "所有新增、更新、删除、清空操作都必须交给工蚁；handdraw_canvas 仅可用于 status 查看，任何写操作都会被系统拒绝。" +
   "每条用户消息开头会注明用户正在查看的画板名，画图/改图请把 board 参数设为该画板名。" +
   "画图时，连接箭头必须从节点边缘出发并尽量走空白区域，绝不能穿过任何节点实体；直线会碰到对象时，优先使用明显的弧线路径（type:path），必要时用折线绕开。" +
+  "绘图时必须先规划互不重叠的区域，再调用 handdraw_delegate；即使只有一个区域，也必须委派给工蚁，调用后不要等待工蚁完成。" +
+  "跨区域标题、箭头和验收也只能拆成工蚁任务执行，蚁后不得直接补画。" +
   "回复保持简洁口语化；纯聊天不要调用工具。";
+
+const WORKER_PROMPT =
+  "你是蚁后的绘图工蚁，只执行主 agent 通过 handdraw_delegate 分配给你的任务。" +
+  "你不和用户对话，不重新规划整体布局，不调用 handdraw_delegate，不修改任务区域外的内容。" +
+  "你必须使用任务指定的 board，并把元素放在指定 region 内；一个任务内的元素按顺序绘制。" +
+  "完成后简短返回 completed；遇到覆盖、坐标或工具错误返回 blocked 及原因。";
 
 // ---------------------------------------------------------------------------
 // 后端抽象
@@ -64,9 +73,13 @@ interface AgentSession {
   prompt(text: string, timeoutMs: number): Promise<string>;
   /** 清空上下文（尽量保进程） */
   reset(): Promise<void>;
+  /** 工蚁身份；蚁后会话没有这个字段。 */
+  readonly workerId?: string;
   kill(): void;
   /** 注册文字增量回调；返回注销函数，避免每轮任务叠加旧订阅。 */
   onTextDelta(cb: (delta: string, full: string) => void): () => void;
+  /** 注册思考（reasoning）增量回调；reasoning 模型在出 text 之前的思考也能推到前端气泡。 */
+  onThinkingDelta(cb: (delta: string, full: string) => void): () => void;
 }
 
 type BackendSpec =
@@ -115,8 +128,10 @@ class PiRpcSession implements AgentSession {
   private nextId = 1;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private turnText = "";
+  private turnThinking = "";
   private settledResolve: (() => void) | null = null;
   private textDeltaCbs: Array<(delta: string, full: string) => void> = [];
+  private thinkingDeltaCbs: Array<(delta: string, full: string) => void> = [];
 
   onTextDelta(cb: (delta: string, full: string) => void): () => void {
     this.textDeltaCbs.push(cb);
@@ -125,17 +140,29 @@ class PiRpcSession implements AgentSession {
       if (index >= 0) this.textDeltaCbs.splice(index, 1);
     };
   }
+  onThinkingDelta(cb: (delta: string, full: string) => void): () => void {
+    this.thinkingDeltaCbs.push(cb);
+    return () => {
+      const index = this.thinkingDeltaCbs.indexOf(cb);
+      if (index >= 0) this.thinkingDeltaCbs.splice(index, 1);
+    };
+  }
   private emitTextDelta(delta: string, full: string) {
     for (const cb of this.textDeltaCbs) {
       try { cb(delta, full); } catch { /* ignore */ }
     }
   }
+  private emitThinkingDelta(delta: string, full: string) {
+    for (const cb of this.thinkingDeltaCbs) {
+      try { cb(delta, full); } catch { /* ignore */ }
+    }
+  }
 
-  constructor(private canvasPort: number, private board: string) {}
+  constructor(private canvasPort: number, private board: string, readonly workerId?: string) {}
 
   async start(): Promise<void> {
     // 每个画板一个持久的 pi session，不会在切换画板后携带其他画板上下文。
-    const sessionDir = join(BOARDS_DIR, this.board, ".pi-web-session");
+    const sessionDir = join(BOARDS_DIR, this.board, this.workerId ? `.pi-worker-${this.workerId}` : ".pi-web-session");
     mkdirSync(sessionDir, { recursive: true });
     const extraArgs = (process.env.HANDDRAW_PI_ARGS ?? "").split(/\s+/).filter(Boolean);
     const proc = spawn(
@@ -143,14 +170,18 @@ class PiRpcSession implements AgentSession {
       [
         "--mode", "rpc",
         "--session-dir", sessionDir,
-        "--name", "handdraw-web-chat",
-        "--append-system-prompt", SCENARIO_PROMPT,
+        "--name", this.workerId ? `handdraw-${this.workerId}` : "handdraw-web-chat",
+        "--append-system-prompt", this.workerId ? WORKER_PROMPT : SCENARIO_PROMPT,
         ...extraArgs,
       ],
       {
         cwd: process.cwd(),
         // 让 handdraw 扩展找到本进程的画布服务器（remote 复用模式，走 HTTP 推送）
-        env: { ...process.env, HANDDRAW_CANVAS_PORTS: String(this.canvasPort) },
+        env: {
+          ...process.env,
+          HANDDRAW_CANVAS_PORT: String(this.canvasPort),
+          HANDDRAW_WORKER_ID: this.workerId ?? "",
+        },
         stdio: ["pipe", "pipe", "pipe"],
       }
     );
@@ -209,6 +240,13 @@ class PiRpcSession implements AgentSession {
       this.emitTextDelta(delta, this.turnText);
       return;
     }
+    // 蚁后/工蚁 reasoning 阶段的思考增量：推到气泡里可见，避免“思考中…”看不到任何字。
+    if (msg.type === "message_update" && msg.assistantMessageEvent?.type === "thinking_delta") {
+      const delta = msg.assistantMessageEvent.delta ?? "";
+      this.turnThinking += delta;
+      this.emitThinkingDelta(delta, this.turnThinking);
+      return;
+    }
     if (msg.type === "agent_settled") {
       this.settledResolve?.();
       this.settledResolve = null;
@@ -251,6 +289,7 @@ class PiRpcSession implements AgentSession {
 
   async prompt(text: string, timeoutMs: number): Promise<string> {
     this.turnText = "";
+    this.turnThinking = "";
     const settled = new Promise<void>((res) => {
       this.settledResolve = res;
     });
@@ -361,12 +400,15 @@ class AcpSession implements AgentSession {
   private pending = new Map<number | string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private buf = "";
   private turnText = "";
+  private turnThinking = "";
   private sessionId: string | null = null;
   private textDeltaCbs: Array<(delta: string, full: string) => void> = [];
+  private thinkingDeltaCbs: Array<(delta: string, full: string) => void> = [];
 
   constructor(
     private spec: { label: string; cmd: string; args: string[] },
-    private canvasPort: number
+    private canvasPort: number,
+    readonly workerId?: string
   ) {
     this.label = spec.label;
   }
@@ -378,8 +420,20 @@ class AcpSession implements AgentSession {
       if (index >= 0) this.textDeltaCbs.splice(index, 1);
     };
   }
+  onThinkingDelta(cb: (delta: string, full: string) => void): () => void {
+    this.thinkingDeltaCbs.push(cb);
+    return () => {
+      const index = this.thinkingDeltaCbs.indexOf(cb);
+      if (index >= 0) this.thinkingDeltaCbs.splice(index, 1);
+    };
+  }
   private emitTextDelta(delta: string, full: string) {
     for (const cb of this.textDeltaCbs) {
+      try { cb(delta, full); } catch { /* ignore */ }
+    }
+  }
+  private emitThinkingDelta(delta: string, full: string) {
+    for (const cb of this.thinkingDeltaCbs) {
       try { cb(delta, full); } catch { /* ignore */ }
     }
   }
@@ -429,7 +483,10 @@ class AcpSession implements AgentSession {
             name: "handdraw",
             command: "npx",
             args: ["tsx", MCP_SERVER],
-            env: [{ name: "HANDDRAW_CANVAS_PORTS", value: String(this.canvasPort) }],
+            env: [
+              { name: "HANDDRAW_CANVAS_PORT", value: String(this.canvasPort) },
+              { name: "HANDDRAW_WORKER_ID", value: this.workerId ?? "" },
+            ],
           },
         ],
       },
@@ -472,6 +529,11 @@ class AcpSession implements AgentSession {
         const delta = update.content.text ?? "";
         this.turnText += delta;
         this.emitTextDelta(delta, this.turnText);
+      } else if (update?.sessionUpdate === "agent_thought_chunk" && update.content?.type === "text") {
+        // ACP 的思考增量：agent_thought_chunk。与 text 分离，保证 reasoning 不会污染最终回复。
+        const delta = update.content.text ?? "";
+        this.turnThinking += delta;
+        this.emitThinkingDelta(delta, this.turnThinking);
       }
       return;
     }
@@ -523,7 +585,9 @@ class AcpSession implements AgentSession {
   async prompt(text: string, timeoutMs: number): Promise<string> {
     if (!this.sessionId) throw new Error("agent 会话未建立");
     this.turnText = "";
-    await this.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, timeoutMs);
+    this.turnThinking = "";
+    const prompt = this.workerId ? `${WORKER_PROMPT}\n\n${text}` : text;
+    await this.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text: prompt }] }, timeoutMs);
     return this.turnText.trim();
   }
 
@@ -549,15 +613,266 @@ class AcpSession implements AgentSession {
 // ---------------------------------------------------------------------------
 
 const BACKEND = resolveBackend();
-type ChatMessage = { role: "user" | "agent"; content: string };
+type ChatMessage = {
+  role: "user" | "agent" | "system" | "worker";
+  content: string;
+  time?: string;
+};
 type BoardAgentState = {
   session: AgentSession | null;
   starting: Promise<AgentSession> | null;
   history: ChatMessage[];
+  activeAgentMessage: ChatMessage | null;
+  /** 蚁后当前 reasoning 增量全文本；仅前端驱动态用，不写入历史。 */
+  activeThinking: string;
+  persistTimer: ReturnType<typeof setTimeout> | null;
 };
+
+function historyFile(board: string): string {
+  return join(BOARDS_DIR, boardKey(board), "chat-history.json");
+}
+function persistHistory(board: string): void {
+  const state = getBoardAgent(board);
+  try {
+    mkdirSync(join(BOARDS_DIR, boardKey(board)), { recursive: true });
+    writeFileSync(historyFile(board), JSON.stringify(state.history, null, 2));
+  } catch { /* history must never break drawing */ }
+}
+function scheduleHistoryPersist(board: string): void {
+  const state = getBoardAgent(board);
+  if (state.persistTimer) return;
+  state.persistTimer = setTimeout(() => {
+    state.persistTimer = null;
+    persistHistory(board);
+  }, 120);
+}
+function addHistory(board: string, role: ChatMessage["role"], content: string): ChatMessage {
+  const message = { role, content, time: new Date().toISOString() } satisfies ChatMessage;
+  const state = getBoardAgent(board);
+  state.history.push(message);
+  scheduleHistoryPersist(board);
+  return message;
+}
 const boardAgents = new Map<string, BoardAgentState>();
-// 画布的工作状态和流式气泡当前是全局广播，任务依旧全局串行，避免不同画板的输出互相抢占。
+
+interface QueuedWorkerTask {
+  taskId: string;
+  title?: string;
+  region: { x: number; y: number; w: number; h: number };
+  instructions: string;
+}
+interface WorkerRuntime {
+  id: string;
+  session: AgentSession | null;
+  starting: Promise<AgentSession> | null;
+  task: QueuedWorkerTask | null;
+  status: "idle" | "starting" | "drawing" | "blocked" | "failed";
+}
+interface WorkerBoardState {
+  queue: QueuedWorkerTask[];
+  workers: WorkerRuntime[];
+  /** 已排队或执行中的区域预留；任务结束后释放。 */
+  reservations: Array<{ taskId: string; region: QueuedWorkerTask["region"] }>;
+}
+const workerBoards = new Map<string, WorkerBoardState>();
+const workerWarmups = new Set<string>();
+const dispatchVersions = new Map<string, number>();
+// 蚁后聊天仍然是一问一答；工蚁队列完全独立，后台异步执行。
 let busy = false;
+
+function workerBoard(board: string): WorkerBoardState {
+  const key = boardKey(board);
+  let state = workerBoards.get(key);
+  if (!state) {
+    state = {
+      queue: [],
+      reservations: [],
+      workers: Array.from({ length: 4 }, (_, i) => ({
+        id: `worker-${i + 1}`,
+        session: null,
+        starting: null,
+        task: null,
+        status: "idle",
+      })),
+    };
+    workerBoards.set(key, state);
+  }
+  return state;
+}
+
+async function reportWorker(worker: WorkerRuntime, board: string): Promise<void> {
+  const server = getCanvasServer();
+  await fetch(`http://localhost:${server.getPort()}/api/workers/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: worker.id,
+      status: worker.status,
+      taskId: worker.task?.taskId,
+      region: worker.task?.region,
+      board,
+    }),
+  }).catch(() => {});
+}
+
+async function ensureWorker(worker: WorkerRuntime, board: string, canvasPort: number): Promise<AgentSession> {
+  if (isReady(worker.session)) return worker.session;
+  if (worker.starting) return worker.starting;
+  worker.status = "starting";
+  await reportWorker(worker, board);
+  worker.starting = (async () => {
+    const session: AgentSession =
+      BACKEND.kind === "pi"
+        ? new PiRpcSession(canvasPort, boardKey(board), worker.id)
+        : new AcpSession(BACKEND, canvasPort, worker.id);
+    await session.start();
+    bindWorkerStream(session, worker.id, board);
+    worker.session = session;
+    worker.starting = null;
+    return session;
+  })().catch((e) => {
+    worker.starting = null;
+    worker.status = "failed";
+    void reportWorker(worker, board);
+    throw e;
+  });
+  return worker.starting;
+}
+
+function regionsOverlap(a: QueuedWorkerTask["region"], b: QueuedWorkerTask["region"]): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+async function warmWorkers(board: string, canvasPort: number): Promise<void> {
+  const key = boardKey(board);
+  if (workerWarmups.has(key)) return;
+  workerWarmups.add(key);
+  const state = workerBoard(key);
+  await Promise.all(state.workers.map(async (worker) => {
+    try {
+      await ensureWorker(worker, board, canvasPort);
+      if (!worker.task) {
+        worker.status = "idle";
+        await reportWorker(worker, board);
+      }
+    } catch (error) {
+      console.error(`[${worker.id}] 预热失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }));
+  workerWarmups.delete(key);
+}
+
+function scheduleWorkerWarmup(board: string, canvasPort: number): void {
+  void warmWorkers(board, canvasPort).catch((error) => console.error(`工蚁预热失败：${error instanceof Error ? error.message : String(error)}`));
+}
+
+function isDrawingRequest(message: string): boolean {
+  return /画|绘|图|架构|流程|涂鸦|手帐|示意|设计|做个|制作|绘制|draw|diagram|sketch/i.test(message);
+}
+
+async function fallbackDelegate(board: string, message: string, canvasPort: number): Promise<void> {
+  const key = boardKey(board);
+  let summary: { bounds?: { maxX: number; minY: number }; occupied?: Array<{ x: number; y: number; w: number; h: number }> } = {};
+  try {
+    const res = await fetch(`http://localhost:${canvasPort}/state?board=${encodeURIComponent(key)}`);
+    summary = await res.json() as typeof summary;
+  } catch { /* 使用默认空位 */ }
+  const maxX = Number.isFinite(summary.bounds?.maxX) ? summary.bounds!.maxX : 80;
+  const minY = Number.isFinite(summary.bounds?.minY) ? Math.max(80, summary.bounds!.minY) : 100;
+  const x = maxX + 140;
+  const regions = [
+    { x, y: minY, w: 300, h: 220, part: "左上/入口部分" },
+    { x: x + 340, y: minY, w: 300, h: 220, part: "右上/处理部分" },
+    { x, y: minY + 280, w: 300, h: 220, part: "左下/辅助部分" },
+    { x: x + 340, y: minY + 280, w: 300, h: 220, part: "右下/结果部分" },
+  ];
+  const tasks = regions.map((region, index) => ({
+    taskId: `auto-${Date.now()}-${index + 1}`,
+    title: `自动拆分 ${region.part}`,
+    region: { x: region.x, y: region.y, w: region.w, h: region.h },
+    instructions:
+      `用户原始需求：${message}\n` +
+      `你负责整体图中的${region.part}。只在指定 region 内绘制与其他三个区域互补的内容；` +
+      "必须使用明确的绝对坐标、每个元素带 desc，不能调用 handdraw_delegate。",
+  }));
+  await enqueueWorkerTasks(key, tasks, canvasPort);
+  addHistory(key, "system", `系统兜底：蚁后本轮未成功委派，已自动拆成 4 个工蚁任务：\n${tasks.map((t) => `- ${t.taskId}：${t.title} @ ${JSON.stringify(t.region)}`).join("\n")}`);
+}
+
+async function pumpWorkers(board: string, canvasPort: number): Promise<void> {
+  const state = workerBoard(board);
+  for (const worker of state.workers) {
+    if (worker.task || state.queue.length === 0) continue;
+    worker.task = state.queue.shift()!;
+    worker.status = "drawing";
+    void (async () => {
+      const task = worker.task!;
+      try {
+        // 先登记 taskId/region，再让 worker 调用绘图工具，避免首笔画撞上状态竞态。
+        await reportWorker(worker, board);
+        const session = await ensureWorker(worker, board, canvasPort);
+        worker.status = "drawing";
+        await reportWorker(worker, board);
+        const prompt =
+          `[异步工蚁任务]\n任务 ID：${task.taskId}\n画板：${boardKey(board)}\n` +
+          `允许区域：${JSON.stringify(task.region)}\n任务标题：${task.title ?? "未命名"}\n` +
+          `绘图要求：${task.instructions}\n` +
+          "调用 handdraw_canvas 时必须原样携带 taskId 和 region 参数；每个元素必须完全位于 region 内。只画这个区域内的任务；完成后回复 completed。";
+        addHistory(board, "worker", `${worker.id} 已领取任务 ${task.taskId}\n区域：${JSON.stringify(task.region)}\n要求：${task.instructions}`);
+        const workerReply = await session.prompt(prompt, PROMPT_TIMEOUT);
+        worker.status = "idle";
+        addHistory(board, "worker", `${worker.id} 完成任务 ${task.taskId}${workerReply ? `\n回复：${workerReply}` : ""}`);
+      } catch (error) {
+        worker.status = "failed";
+        const reason = error instanceof Error ? error.message : String(error);
+        addHistory(board, "worker", `${worker.id} 任务 ${task.taskId} 失败：${reason}`);
+        console.error(`[${worker.id}] ${reason}`);
+      } finally {
+        worker.task = null;
+        const reservationIndex = state.reservations.findIndex((r) => r.taskId === task.taskId);
+        if (reservationIndex >= 0) state.reservations.splice(reservationIndex, 1);
+        await reportWorker(worker, board);
+        void pumpWorkers(board, canvasPort);
+      }
+    })();
+  }
+}
+
+async function enqueueWorkerTasks(
+  board: string,
+  tasks: Array<{ taskId?: string; title?: string; region: { x: number; y: number; w: number; h: number }; instructions: string }>,
+  canvasPort: number
+): Promise<{ queued: number; workers: WorkerRuntime[] }> {
+  const state = workerBoard(board);
+  const normalized = tasks.map((task, index) => ({
+    ...task,
+    taskId: task.taskId || `task-${Date.now()}-${index + 1}`,
+  }));
+  const ids = new Set<string>();
+  for (const task of normalized) {
+    if (ids.has(task.taskId) || state.reservations.some((r) => r.taskId === task.taskId)) {
+      throw new Error(`任务 ID 重复：${task.taskId}`);
+    }
+    ids.add(task.taskId);
+    if (!(task.region.w > 0 && task.region.h > 0)) throw new Error(`任务区域尺寸必须大于 0：${task.taskId}`);
+    if (state.reservations.some((r) => regionsOverlap(task.region, r.region))) {
+      const hit = state.reservations.find((r) => regionsOverlap(task.region, r.region))!;
+      throw new Error(`任务区域与现有任务重叠：${task.taskId} 与 ${hit.taskId}`);
+    }
+    for (const other of normalized) {
+      if (other !== task && other.taskId < task.taskId && regionsOverlap(task.region, other.region)) {
+        throw new Error(`任务区域重叠：${task.taskId} 与 ${other.taskId}`);
+      }
+    }
+  }
+  for (const task of normalized) {
+    state.reservations.push({ taskId: task.taskId, region: task.region });
+    state.queue.push(task);
+  }
+  dispatchVersions.set(boardKey(board), (dispatchVersions.get(boardKey(board)) ?? 0) + 1);
+  void pumpWorkers(board, canvasPort);
+  return { queued: normalized.length, workers: state.workers };
+}
 
 function boardKey(board: string): string {
   return board || DEFAULT_BOARD;
@@ -566,10 +881,97 @@ function getBoardAgent(board: string): BoardAgentState {
   const key = boardKey(board);
   let state = boardAgents.get(key);
   if (!state) {
-    state = { session: null, starting: null, history: [] };
+    let history: ChatMessage[] = [];
+    try {
+      const saved = JSON.parse(readFileSync(historyFile(key), "utf8")) as unknown;
+      if (Array.isArray(saved)) history = saved.filter((m): m is ChatMessage => Boolean(m && typeof m === "object" && typeof (m as ChatMessage).content === "string"));
+    } catch { /* 首次使用或旧版本没有历史 */ }
+    state = { session: null, starting: null, history, activeAgentMessage: null, activeThinking: "", persistTimer: null };
     boardAgents.set(key, state);
   }
   return state;
+}
+
+function bindQueenStream(session: AgentSession, board: string): void {
+  const state = getBoardAgent(board);
+  session.onTextDelta((delta, full) => {
+    if (!state.activeAgentMessage) {
+      state.activeAgentMessage = addHistory(board, "agent", "");
+    }
+    state.activeAgentMessage.content = full;
+    // 若蚁后输出的首句话是思考内容，前端会立即看到“思考中…”被实际文字覆盖。
+    state.activeThinking = "";
+    scheduleHistoryPersist(board);
+    getCanvasServer().broadcastSpeech({
+      board: boardKey(board),
+      kind: "text",
+      delta,
+      full,
+      done: false,
+    });
+  });
+  // reasoning 增量：完整打到蚁后气泡里，避免“思考中…”看不见任何字。
+  session.onThinkingDelta((delta, full) => {
+    state.activeThinking = full;
+    if (!state.activeAgentMessage) {
+      // 思考先于第一条 text：仅占位，不写入历史（思考是中途状态，历史只记最终文字回复）。
+      state.activeAgentMessage = addHistory(board, "agent", "");
+    }
+    scheduleHistoryPersist(board);
+    getCanvasServer().broadcastSpeech({
+      board: boardKey(board),
+      kind: "thinking",
+      delta,
+      full,
+      done: false,
+    });
+  });
+}
+
+function bindWorkerStream(session: AgentSession, workerId: string, board: string): void {
+  // 每只工蚁独立 session：text 与 thinking 增量都带上 workerId，前端路由到该工蚁专属气泡。
+  session.onTextDelta((delta, full) => {
+    getCanvasServer().broadcastSpeech({
+      board: boardKey(board),
+      kind: "text",
+      delta,
+      full,
+      done: false,
+      workerId,
+    });
+  });
+  session.onThinkingDelta((delta, full) => {
+    getCanvasServer().broadcastSpeech({
+      board: boardKey(board),
+      kind: "thinking",
+      delta,
+      full,
+      done: false,
+      workerId,
+    });
+  });
+}
+
+function finishQueenStream(board: string): string | null {
+  const state = getBoardAgent(board);
+  const content = state.activeAgentMessage?.content ?? null;
+  if (content != null) {
+    getCanvasServer().broadcastSpeech({
+      board: boardKey(board),
+      kind: "text",
+      full: content,
+      done: true,
+    });
+    // 思考阶段没有产生文字时，移除临时占位消息，避免历史里留下空的“蚁后”气泡。
+    if (!content.trim() && state.activeAgentMessage) {
+      const index = state.history.indexOf(state.activeAgentMessage);
+      if (index >= 0) state.history.splice(index, 1);
+    }
+    state.activeAgentMessage = null;
+    state.activeThinking = "";
+    scheduleHistoryPersist(board);
+  }
+  return content;
 }
 function isReady(s: AgentSession | null): s is AgentSession {
   return Boolean(s?.alive);
@@ -586,6 +988,7 @@ async function ensureAgent(board: string, canvasPort: number): Promise<AgentSess
     await s.start();
     state.session = s;
     state.starting = null;
+    bindQueenStream(s, key);
     return s;
   })().catch((e) => {
     state.starting = null;
@@ -597,13 +1000,27 @@ async function ensureAgent(board: string, canvasPort: number): Promise<AgentSess
 async function chatWithAgent(message: string, board: string, canvasPort: number): Promise<string> {
   const key = boardKey(board);
   const agent = await ensureAgent(key, canvasPort);
+  // 先确保蚁后会话独占首轮资源，再后台预热工蚁，避免五个模型进程同时抢启动资源。
+  scheduleWorkerWarmup(key, canvasPort);
   const context = `[用户正在浏览器里查看画板「${key}」。]\n\n${message}`;
-  // agent 工作期间（思考+作画）点亮画布呼吸灯
+  const dispatchVersionBefore = dispatchVersions.get(key) ?? 0;
+  // 先把用户消息和一个临时的蚁后消息放进历史；模型尚未输出文字时，历史也能显示“思考中…”。
+  addHistory(key, "user", message);
+  const state = getBoardAgent(key);
+  state.activeAgentMessage = addHistory(key, "agent", "");
   await setAgentWorking(true);
   try {
     const reply = await agent.prompt(context, PROMPT_TIMEOUT);
+    if (isDrawingRequest(message) && (dispatchVersions.get(key) ?? 0) === dispatchVersionBefore) {
+      await fallbackDelegate(key, message, canvasPort);
+    }
+    const streamed = finishQueenStream(key);
+    // pi/ACP 若没有文本增量，仍记录最终回复；若最终文本与流式文本不同，也保留两者。
+    if (reply && streamed !== reply) addHistory(key, "agent", reply);
     return reply || "（agent 没有文字回复，但它可能已经动手画了）";
   } catch (e) {
+    finishQueenStream(key);
+    addHistory(key, "system", `蚁后执行失败：${e instanceof Error ? e.message : String(e)}`);
     throw e;
   } finally {
     await setAgentWorking(false);
@@ -738,6 +1155,47 @@ function makeAgentApi(canvasPortRef: () => number) {
       json(200, { ok: true, ...(await collectAgentDetail(board)) });
       return true;
     }
+    if (url.pathname === "/api/delegate" && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const board = String(body.board ?? DEFAULT_BOARD);
+        if (!isValidBoardName(board)) throw new Error("非法画板名");
+        const rawTasks = Array.isArray(body.tasks) ? body.tasks : [];
+        const tasks = rawTasks.filter((task): task is Record<string, unknown> => Boolean(task && typeof task === "object"));
+        if (!tasks.length) throw new Error("没有任务");
+        if (tasks.length !== 4) throw new Error("严格四工蚁模式要求一次委派 4 个互不重叠的区域任务");
+        const normalized = tasks.map((task, index) => {
+          const region = task.region as Record<string, unknown>;
+          if (!region || ![region.x, region.y, region.w, region.h].every((n) => typeof n === "number" && Number.isFinite(n))) {
+            throw new Error(`任务 ${index + 1} 缺少有效 region`);
+          }
+          const instructions = String(task.instructions ?? "").trim();
+          if (!instructions) throw new Error(`任务 ${index + 1} 缺少 instructions`);
+          return {
+            taskId: String(task.taskId ?? `task-${Date.now()}-${index + 1}`),
+            title: task.title ? String(task.title) : undefined,
+            region: { x: Number(region.x), y: Number(region.y), w: Number(region.w), h: Number(region.h) },
+            instructions,
+          };
+        });
+        for (let i = 0; i < normalized.length; i++) {
+          for (let j = i + 1; j < normalized.length; j++) {
+            const a = normalized[i].region;
+            const b = normalized[j].region;
+            if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) {
+              throw new Error(`任务区域重叠：${normalized[i].taskId} 与 ${normalized[j].taskId}`);
+            }
+          }
+        }
+            addHistory(board, "system", `蚁后已派发 ${normalized.length} 个工蚁任务：\n${normalized.map((task) => `- ${task.taskId} @ ${JSON.stringify(task.region)}：${task.instructions}`).join("\n")}`);
+        const result = await enqueueWorkerTasks(board, normalized, canvasPortRef());
+        setTimeout(() => scheduleWorkerWarmup(board, canvasPortRef()), 1500);
+        json(200, { ok: true, board: boardKey(board), ...result, workers: result.workers.map((w) => ({ id: w.id, status: w.status, taskId: w.task?.taskId })) });
+      } catch (e) {
+        json(400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+      return true;
+    }
     // 模型切换只适用于 pi RPC；选择器打开时会预热当前画板的会话，以便读取可用模型。
     if (url.pathname === "/api/agent/models" && req.method === "GET") {
       if (BACKEND.kind !== "pi") {
@@ -784,7 +1242,7 @@ function makeAgentApi(canvasPortRef: () => number) {
     if (url.pathname === "/api/chat/history" && req.method === "GET") {
       const board = url.searchParams.get("board") ?? "";
       const state = getBoardAgent(board);
-      json(200, { board: boardKey(board), messages: state.history.slice(-100) });
+      json(200, { board: boardKey(board), messages: state.history });
       return true;
     }
     if (url.pathname === "/api/chat/reset" && req.method === "POST") {
@@ -793,6 +1251,8 @@ function makeAgentApi(canvasPortRef: () => number) {
       const board = String(body.board ?? "");
       const state = getBoardAgent(board);
       state.history.length = 0;
+      state.activeAgentMessage = null;
+      persistHistory(board);
       if (state.session) {
         await state.session.reset().catch(() => state.session?.kill());
         if (!isReady(state.session)) state.session = null;
@@ -821,7 +1281,6 @@ function makeAgentApi(canvasPortRef: () => number) {
       busy = true;
       try {
         const reply = await chatWithAgent(message, board, canvasPortRef());
-        getBoardAgent(board).history.push({ role: "user", content: message }, { role: "agent", content: reply });
         json(200, { reply });
       } catch (e) {
         json(500, { error: e instanceof Error ? e.message : String(e) });
@@ -845,8 +1304,14 @@ async function main() {
   const mode = await server.start();
   const url = `http://localhost:${server.getPort()}`;
   console.log(`✏️  Web Agent 画布已启动: ${url}`);
+  // 后台预热四个长期 worker；不阻塞页面和蚁后聊天，首批任务无需再承担进程启动开销。
+  if (mode === "local") {
+    void ensureAgent(DEFAULT_BOARD, server.getPort()).then(() => {
+      setTimeout(() => scheduleWorkerWarmup(DEFAULT_BOARD, server.getPort()), 1000);
+    }).catch((error) => console.error(`蚁后预热失败：${error instanceof Error ? error.message : String(error)}`));
+  }
   if (mode === "remote") {
-    console.warn("   ⚠️ 端口上已有一个画布服务器在跑，聊天 API 未挂载；请先停掉旧进程或换 HANDDRAW_CANVAS_PORTS");
+    console.warn("   ⚠️ 8788 端口上已有一个画布服务器在跑，聊天 API 未挂载；请先停止旧 handdraw 进程");
   }
   exec(
     process.platform === "darwin" ? `open "${url}"` : process.platform === "win32" ? `start "" "${url}"` : `xdg-open "${url}"`,

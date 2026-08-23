@@ -132,6 +132,46 @@ export function isValidBoardName(name: string): boolean {
   );
 }
 
+/** 单个工蚁的展示/校验状态（web-agent 是唯一写入者，CanvasServer 是唯一广播者） */
+export interface WorkerState {
+  id: string;
+  status: string;
+  taskId?: string;
+  region?: { x: number; y: number; w: number; h: number };
+}
+
+/** 工蚁状态单一来源：web-agent 派单后调 update，订阅者（CanvasServer）负责推 WS */
+export class WorkerStateRegistry {
+  private states = new Map<string, WorkerState[]>();
+  private listeners = new Set<(board: string, states: WorkerState[]) => void>();
+
+  getStates(board: string): WorkerState[] {
+    let states = this.states.get(board);
+    if (!states) {
+      states = Array.from({ length: 4 }, (_, i) => ({ id: `worker-${i + 1}`, status: "idle" }));
+      this.states.set(board, states);
+    }
+    return states;
+  }
+
+  /** 更新单只工蚁并通知订阅者；返回 false 表示 workerId 不存在 */
+  update(board: string, workerId: string, patch: Partial<Omit<WorkerState, "id">>): boolean {
+    const states = this.getStates(board);
+    const target = states.find((s) => s.id === workerId);
+    if (!target) return false;
+    if (patch.status !== undefined) target.status = patch.status;
+    if ("taskId" in patch) target.taskId = patch.taskId;
+    if ("region" in patch) target.region = patch.region;
+    for (const l of this.listeners) l(board, states);
+    return true;
+  }
+
+  subscribe(fn: (board: string, states: WorkerState[]) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+}
+
 export class CanvasServer {
   private http: Server | null = null;
   private wss: WebSocketServer | null = null;
@@ -139,27 +179,8 @@ export class CanvasServer {
   private clients = new Map<WebSocket, string>();
   /** agent 是否在工作（思考+作画）：新连接会同步该状态 */
   private agentWorking = false;
-  /** 当前异步绘图 worker 的状态，按画板隔离，供页面显示调度进度和区域校验 */
-  private workerStates = new Map<string, Array<{
-    id: string;
-    status: string;
-    taskId?: string;
-    region?: { x: number; y: number; w: number; h: number };
-  }>>();
-
-  private getWorkerStates(board: string): Array<{
-    id: string;
-    status: string;
-    taskId?: string;
-    region?: { x: number; y: number; w: number; h: number };
-  }> {
-    let states = this.workerStates.get(board);
-    if (!states) {
-      states = Array.from({ length: 4 }, (_, i) => ({ id: `worker-${i + 1}`, status: "idle" }));
-      this.workerStates.set(board, states);
-    }
-    return states;
-  }
+  /** 工蚁状态注册表：web-agent 写入，这里订阅后广播到页面 */
+  readonly workerRegistry = new WorkerStateRegistry();
   private pageHtml = "";
   private actualPort = 0;
   /** 额外路由（web-agent 模式注册聊天 API 用），在内置路由全部未命中后调用 */
@@ -215,6 +236,10 @@ export class CanvasServer {
     }
     this.store.migrateLegacyState();
     this.store.loadActive();
+    // 工蚁状态变更 → WS 广播（web-agent 是唯一写入者）
+    this.workerRegistry.subscribe((board, workers) => {
+      this.broadcast(board, JSON.stringify({ type: "workers", workers }));
+    });
     for (const port of CANVAS_PORTS) {
       const ok = await this.tryListen(port);
       if (ok === "local") {
@@ -394,7 +419,7 @@ export class CanvasServer {
           }
           if (req.method === "GET" && url.pathname === "/api/workers") {
             const board = this.boardOf(url);
-            const workers = this.getWorkerStates(board);
+            const workers = this.workerRegistry.getStates(board);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ board, workers }));
             return;
@@ -408,16 +433,15 @@ export class CanvasServer {
               region?: { x: number; y: number; w: number; h: number };
             };
             const board = this.boardOf(url, body);
-            const workers = this.getWorkerStates(board);
-            const worker = workers.find((w) => w.id === body.id);
-            if (worker) {
-              worker.status = body.status ?? worker.status;
-              worker.taskId = body.taskId;
-              worker.region = body.region;
-              this.broadcast(board, JSON.stringify({ type: "workers", workers }));
-            }
+            // 广播由 registry 订阅者统一触发
+            const ok = this.workerRegistry.update(board, body.id ?? "", {
+              status: body.status,
+              taskId: body.taskId,
+              region: body.region,
+            });
+            const workers = this.workerRegistry.getStates(board);
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: Boolean(worker), board, workers }));
+            res.end(JSON.stringify({ ok, board, workers }));
             return;
           }
           if (req.method === "POST" && url.pathname === "/api/agent-status") {
@@ -491,7 +515,7 @@ export class CanvasServer {
         // 同步当前 agent 工作状态（呼吸灯）
         ws.send(JSON.stringify({ type: "agent", working: this.agentWorking }));
         // 同步四个异步工蚁的当前状态
-        ws.send(JSON.stringify({ type: "workers", workers: this.getWorkerStates(board) }));
+        ws.send(JSON.stringify({ type: "workers", workers: this.workerRegistry.getStates(board) }));
       });
 
       http.on("error", (err: NodeJS.ErrnoException) => {
@@ -534,7 +558,7 @@ export class CanvasServer {
   private validateWorkerPush(board: string, strokes: StrokeMsg[], elements: CanvasElementInfo[]): void {
     const workerIds = new Set(strokes.map((s) => s.workerId).filter((id): id is string => Boolean(id)));
     for (const workerId of workerIds) {
-      const worker = this.getWorkerStates(board).find((w) => w.id === workerId);
+      const worker = this.workerRegistry.getStates(board).find((w) => w.id === workerId);
       if (!worker || worker.status !== "drawing" || !worker.taskId || !worker.region) {
         throw new Error(`工蚁 ${workerId} 没有可用的活动任务区域`);
       }

@@ -701,18 +701,12 @@ function workerBoard(board: string): WorkerBoardState {
 }
 
 async function reportWorker(worker: WorkerRuntime, board: string): Promise<void> {
-  const server = getCanvasServer();
-  await fetch(`http://localhost:${server.getPort()}/api/workers/status`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      id: worker.id,
-      status: worker.status,
-      taskId: worker.task?.taskId,
-      region: worker.task?.region,
-      board,
-    }),
-  }).catch(() => {});
+  // 同进程直调 registry（单一来源）；广播由 CanvasServer 的订阅者完成
+  getCanvasServer().workerRegistry.update(boardKey(board), worker.id, {
+    status: worker.status,
+    taskId: worker.task?.taskId,
+    region: worker.task?.region,
+  });
 }
 
 async function ensureWorker(worker: WorkerRuntime, board: string, canvasPort: number): Promise<AgentSession> {

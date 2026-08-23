@@ -114,6 +114,80 @@
   button:active { background: rgba(16, 24, 40, 0.1); }
   button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #btnClear:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
+  /* 底栏画板切换按钮：左侧画板名 + 下箭头 */
+  #boardSwitcher {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; font-size: 13px; font-weight: 500;
+    color: var(--ink);
+  }
+  #boardSwitcher .bs-arrow { font-size: 10px; color: var(--muted); transition: transform 0.2s ease; }
+  #boardSwitcher[aria-expanded="true"] .bs-arrow { transform: rotate(180deg); }
+  /* 画板卡片浮层：玻璃风，固定宽度网格 */
+  .board-pop {
+    position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+    width: min(720px, calc(100vw - 32px));
+    max-height: 70vh; overflow-y: auto;
+    background: var(--island);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 2px 4px rgba(16, 24, 40, 0.05), 0 16px 48px rgba(16, 24, 40, 0.16);
+    z-index: 14;
+    padding: 16px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .board-card {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: #fff; cursor: pointer; overflow: hidden;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+    text-align: left;
+  }
+  .board-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(16, 24, 40, 0.08);
+    border-color: var(--accent);
+  }
+  .board-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+  .board-card .card-thumb {
+    width: 100%; height: 110px; background: #f6f7f9;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .board-card .card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .board-card .card-thumb .thumb-empty {
+    color: var(--muted); font-size: 12px; font-style: italic;
+  }
+  .board-card .card-body {
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 3px;
+  }
+  .board-card .card-name {
+    font-size: 13px; font-weight: 600; color: var(--ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .board-card .card-meta {
+    font-size: 11px; color: var(--muted); display: flex; justify-content: space-between;
+  }
+  .board-pop .pop-header {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; justify-content: space-between;
+    margin: -4px 0 4px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .board-pop .pop-header .ph-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .board-pop .pop-header .ph-close {
+    padding: 2px 8px; font-size: 13px; color: var(--muted);
+  }
+  .board-pop .pop-header .ph-close:hover { color: var(--ink); }
+  .board-pop .pop-empty {
+    grid-column: 1 / -1;
+    padding: 32px 16px; text-align: center;
+    color: var(--muted); font-size: 12.5px;
+  }
   select { border-color: var(--border); background: #fff; }
   #hint {
     color: var(--muted); font-size: 12px;
@@ -436,6 +510,37 @@
   }
   .sel-chip .sel-id { color: var(--muted); }
   #selDelete:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
+  /* ---------- 工蚁区域可视化 ---------- */
+  .worker-region-rect {
+    fill: rgba(0, 0, 0, 0.02);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+    animation: workerRegionIn 0.25s ease-out forwards;
+  }
+  @keyframes workerRegionIn { from { opacity: 0; } to { opacity: 0.6; } }
+  .worker-region-rect.w1 { stroke: #3b82f6; }
+  .worker-region-rect.w2 { stroke: #22c55e; }
+  .worker-region-rect.w3 { stroke: #f97316; }
+  .worker-region-rect.w4 { stroke: #a855f7; }
+  .worker-region-label {
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    font-size: 11px; font-weight: 600;
+    fill: white;
+    paint-order: stroke;
+    stroke: rgba(0, 0, 0, 0.45);
+    stroke-width: 2.5;
+    pointer-events: none;
+    animation: workerRegionIn 0.25s ease-out forwards;
+  }
+  /* 持久态：drawing 时一直显示，done/idle 才淡出 */
+  .worker-region-rect.fading, .worker-region-label.fading {
+    animation: workerRegionOut 0.6s ease-in forwards;
+  }
+  @keyframes workerRegionOut { from { opacity: 0.6; } to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .worker-region-rect, .worker-region-label { animation: none; opacity: 0.6; }
+  }
 </style>
 </head>
 <body>
@@ -447,7 +552,7 @@
   <div class="toast hud"><span class="dot" id="wsDot"></span><span class="board" id="boardName"></span><span class="agent-pulse" id="agentPulse" hidden><i></i><i></i><i></i><span class="agent-label">AI 思考 / 作画中…</span></span><span class="label" id="curLabel">…</span><span class="progress" id="progress">0</span></div>
   <div id="breath"></div>
   <div class="controls hud">
-    <select id="boardSelect" onchange="switchBoard(this.value)"></select>
+    <button id="boardSwitcher" onclick="toggleBoardPop()" title="切换画板"><span id="boardSwitcherName">…</span><span class="bs-arrow">▾</span></button>
     <button onclick="toggleNbPop()" id="btnNewBoard" title="新建画板">＋</button>
     <button onclick="resetView()" id="btnFit">适应</button>
     <button onclick="location.reload()" id="btnRefresh">刷新</button>
@@ -455,6 +560,7 @@
     <button onclick="clearBoard()" id="btnClear">清空</button>
     <span id="hint">滚轮缩放 · 拖拽平移 · 实时连接</span>
   </div>
+  <div class="board-pop" id="boardPop" hidden></div>
   <div class="nb-pop" id="nbPop" hidden>
     <input id="nbName" placeholder="新画板名" maxlength="60">
     <button class="ok" onclick="createBoardFromPop()" id="nbOk">创建</button>
@@ -528,6 +634,15 @@ const I18N = {
   // agent 未配置 / 错误
   noCfg: "未配置模型 API Key：请设置 HANDDRAW_LLM_API_KEY 后重启 agent。",
   netErr: "⚠️ 网络错误，请稍后再试",
+  // 画板卡片浮层
+  boardPopTitle: "切换画板",
+  boardPopEmpty: "空白画板",
+  boardPopThumbFail: "无缩略图",
+  boardCardCount: "{n} 个元素",
+  boardJustNow: "刚刚",
+  boardMinAgo: "{n} 分钟前",
+  boardHourAgo: "{n} 小时前",
+  boardDayAgo: "{n} 天前",
 };
 function tr(key, vars) {
   let s = I18N[key] ?? key;
@@ -546,31 +661,122 @@ document.getElementById("nbOk").textContent = tr("create");
 document.getElementById("inputText").placeholder = tr("inputPh");
 document.getElementById("inputSend").textContent = tr("inputSend");
 
-// ---------- 画板 ----------
+// ---------- 画板：项目卡片切换 ----------
 let board = new URLSearchParams(location.search).get("board") || "";
 const boardNameEl = document.getElementById("boardName");
-const boardSelect = document.getElementById("boardSelect");
+const boardSwitcher = document.getElementById("boardSwitcher");
+const boardSwitcherName = document.getElementById("boardSwitcherName");
+const boardPop = document.getElementById("boardPop");
+let boardPopOpen = false;
 async function initBoard() {
+  // 顶栏 toast 文案初始化（不依赖 boardList，避免加载顺序耦合）
   try {
     const res = await fetch("/api/boards");
     const data = await res.json();
     if (!board) board = data.active || "default";
-    boardSelect.innerHTML = "";
-    for (const b of data.boards ?? []) {
-      const opt = document.createElement("option");
-      opt.value = b.name;
-      opt.textContent = b.name;
-      if (b.name === board) opt.selected = true;
-      boardSelect.appendChild(opt);
-    }
   } catch { if (!board) board = "default"; }
   boardNameEl.textContent = tr("board") + " · " + board;
+  boardSwitcherName.textContent = board;
   restoreView(); // 恢复该画板上次的视角
   connect();
 }
-function switchBoard(name) {
-  if (name && name !== board) location.search = "?board=" + encodeURIComponent(name);
+async function loadBoardList() {
+  let boards = [];
+  try {
+    const res = await fetch("/api/boards");
+    const data = await res.json();
+    boards = data.boards ?? [];
+  } catch { /* 失败也允许用户继续 */ }
+  boardPop.innerHTML = "";
+  // 头部：标题 + 关闭
+  const header = document.createElement("div");
+  header.className = "pop-header";
+  header.innerHTML = `<span class="ph-title">${tr("boardPopTitle") || "切换画板"}</span><button class="ph-close" id="boardPopClose">✕</button>`;
+  boardPop.appendChild(header);
+  document.getElementById("boardPopClose").addEventListener("click", closeBoardPop);
+  if (!boards.length) {
+    const empty = document.createElement("div");
+    empty.className = "pop-empty";
+    empty.textContent = tr("boardPopEmpty") || "暂无画板";
+    boardPop.appendChild(empty);
+    return;
+  }
+  for (const b of boards) {
+    const card = document.createElement("button");
+    card.className = "board-card" + (b.name === board ? " active" : "");
+    card.dataset.name = b.name;
+    const thumb = document.createElement("div");
+    thumb.className = "card-thumb";
+    if (b.thumbnail) {
+      const img = document.createElement("img");
+      img.src = b.thumbnail;
+      img.alt = b.name;
+      img.loading = "lazy";
+      img.onerror = () => { img.replaceWith(Object.assign(document.createElement("div"), { className: "thumb-empty", textContent: tr("boardPopThumbFail") || "无缩略图" })); };
+      thumb.appendChild(img);
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "thumb-empty";
+      empty.textContent = tr("boardPopEmpty") || "空白画板";
+      thumb.appendChild(empty);
+    }
+    const body = document.createElement("div");
+    body.className = "card-body";
+    const name = document.createElement("div");
+    name.className = "card-name";
+    name.textContent = b.name;
+    const meta = document.createElement("div");
+    meta.className = "card-meta";
+    const count = document.createElement("span");
+    count.textContent = tr("boardCardCount", { n: b.elementCount });
+    const edited = document.createElement("span");
+    edited.textContent = formatRelativeTime(b.lastEdited);
+    meta.appendChild(count);
+    meta.appendChild(edited);
+    body.appendChild(name);
+    body.appendChild(meta);
+    card.appendChild(thumb);
+    card.appendChild(body);
+    card.addEventListener("click", () => switchBoard(b.name));
+    boardPop.appendChild(card);
+  }
 }
+function switchBoard(name) {
+  if (name && name !== board) {
+    closeBoardPop();
+    location.search = "?board=" + encodeURIComponent(name);
+  }
+}
+function toggleBoardPop() {
+  if (boardPopOpen) closeBoardPop();
+  else openBoardPop();
+}
+async function openBoardPop() {
+  boardPopOpen = true;
+  boardPop.hidden = false;
+  boardSwitcher.setAttribute("aria-expanded", "true");
+  await loadBoardList();
+}
+function closeBoardPop() {
+  boardPopOpen = false;
+  boardPop.hidden = true;
+  boardSwitcher.setAttribute("aria-expanded", "false");
+}
+/** 把 ms 时间戳格式化为相对时间：刚刚 / x 分钟前 / x 小时前 / x 天前 */
+function formatRelativeTime(ms) {
+  if (!ms) return "";
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return tr("boardJustNow") || "刚刚";
+  if (diff < 3_600_000) return tr("boardMinAgo", { n: Math.floor(diff / 60_000) });
+  if (diff < 86_400_000) return tr("boardHourAgo", { n: Math.floor(diff / 3_600_000) });
+  return tr("boardDayAgo", { n: Math.floor(diff / 86_400_000) });
+}
+// 点击浮层外部关闭（参考 agent-pop 的逻辑）
+document.addEventListener("click", (e) => {
+  if (!boardPopOpen) return;
+  if (boardPop.contains(e.target) || boardSwitcher.contains(e.target)) return;
+  closeBoardPop();
+});
 
 // ---------- 无限画布 ----------
 const svg = document.getElementById("canvas");
@@ -1269,6 +1475,54 @@ document.addEventListener("click", (e) => {
   agentPop.hidden = true;
 });
 
+// ---------- 工蚁分配区域可视化（蚁后告诉用户"这块分给 worker-N 了"） ----------
+/** 状态→中文短标签 */
+function workerStatusLabel(status) {
+  return ({
+    idle: "待命",
+    starting: "热身",
+    drawing: "绘制中",
+    done: "完成",
+  })[status] || status || "待命";
+}
+/**
+ * 在画布 overlay 上画/更新某个 worker 的区域框。
+ * - region 为 null → 立即清除该 worker 的旧框
+ * - region 存在 + status 是 drawing/starting → 持久显示（不淡出）
+ * - region 存在 + status 是 done/idle → 画完后 2.5s 淡出
+ */
+function drawWorkerRegion(workerId, region, status) {
+  const layer = document.getElementById("overlay");
+  if (!layer) return;
+  // 先清掉该 worker 旧的可视化节点
+  layer.querySelectorAll(`[data-worker-region="${CSS.escape(workerId)}"]`).forEach((n) => n.remove());
+  if (!region || typeof region.x !== "number") return;
+  const num = workerId.match(/\d+/)?.[0] || "1";
+  const persistent = status === "drawing" || status === "starting";
+  const rect = svgNS("rect");
+  rect.setAttribute("x", region.x);
+  rect.setAttribute("y", region.y);
+  rect.setAttribute("width", region.w);
+  rect.setAttribute("height", region.h);
+  rect.setAttribute("rx", "8");
+  rect.setAttribute("class", `worker-region-rect w${num}${persistent ? "" : " fading"}`);
+  rect.setAttribute("data-worker-region", workerId);
+  layer.appendChild(rect);
+  const label = svgNS("text");
+  label.setAttribute("x", region.x + 8);
+  label.setAttribute("y", region.y + 18);
+  label.setAttribute("class", `worker-region-label${persistent ? "" : " fading"}`);
+  label.setAttribute("data-worker-region", workerId);
+  label.textContent = `${workerId} · ${workerStatusLabel(status)}`;
+  layer.appendChild(label);
+  // 非持久态：动画结束后清理 DOM，避免 overlay 节点堆积
+  if (!persistent) {
+    setTimeout(() => {
+      rect.remove();
+      label.remove();
+    }, 3200);
+  }
+}
 // ---------- 静默整体刷新：agent 任务结束后重绘全部内容，清掉前端残留 ----------
 /** 笔画版本号：fetch 期间若有新笔画到达则放弃本次刷新（下一次 agent 结束还会再刷） */
 let strokeSeq = 0;
@@ -1569,6 +1823,8 @@ function connect() {
           el.classList.toggle("busy", worker.status === "drawing" || worker.status === "starting");
           el.dataset.workerStatus = worker.status;
           el.dataset.taskId = worker.taskId || "";
+          // 工蚁分配区域可视化：仅在 region 存在时画虚线框；空 region 视为清除
+          drawWorkerRegion(worker.id, worker.region ?? null, worker.status);
         }
         return;
       }

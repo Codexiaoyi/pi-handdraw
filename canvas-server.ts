@@ -13,10 +13,11 @@
  */
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { pageStrings, getLang } from "./i18n";
+import { buildSvg, type HandDrawElement } from "./draw";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** 画板根目录（可用 HANDDRAW_BOARDS_DIR 覆盖） */
@@ -106,6 +107,10 @@ export interface BoardListItem {
   elementCount: number;
   dir: string;
   active: boolean;
+  /** 缩略图 URL（动态返回 SVG），无内容时为 null */
+  thumbnail: string | null;
+  /** 最近编辑时间（ms），用于卡片显示 "x 分钟前" */
+  lastEdited: number;
 }
 
 /** 额外路由处理器（如 web-agent 的聊天 API）：返回 true = 已处理 */
@@ -249,12 +254,32 @@ export class CanvasServer {
       /* boards 目录还没建 */
     }
     if (names.size === 0) names.add(DEFAULT_BOARD);
-    return [...names].sort().map((name) => ({
-      name,
-      elementCount: this.getBoard(name).elements.length,
-      dir: this.boardDir(name),
-      active: name === this.activeBoard,
-    }));
+    return [...names].sort().map((name) => {
+      const board = this.getBoard(name);
+      const elementCount = board.elements.length;
+      return {
+        name,
+        elementCount,
+        dir: this.boardDir(name),
+        active: name === this.activeBoard,
+        // 有内容就给缩略图 URL；空画板=null（前端显示空白占位）
+        thumbnail: elementCount > 0 ? `/api/boards/${encodeURIComponent(name)}/thumb` : null,
+        lastEdited: this.boardMtime(name),
+      };
+    });
+  }
+
+  /** 画板最近编辑时间：state.json 的 mtime；不存在则目录 mtime；都没有则 0 */
+  private boardMtime(name: string): number {
+    try {
+      return statSync(this.stateFile(name)).mtimeMs;
+    } catch {
+      try {
+        return statSync(this.boardDir(name)).mtimeMs;
+      } catch {
+        return 0;
+      }
+    }
   }
 
   /** 创建画板（目录 + images/ 子目录）；返回 false = 已存在 */
@@ -467,6 +492,30 @@ export class CanvasServer {
           if (url.pathname === "/api/boards" && req.method === "GET") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ active: this.activeBoard, boards: this.listBoards() }));
+            return;
+          }
+          if (req.method === "GET" && url.pathname.startsWith("/api/boards/") && url.pathname.endsWith("/thumb")) {
+            const raw = decodeURIComponent(url.pathname.slice("/api/boards/".length, -"/thumb".length));
+            if (!isValidBoardName(raw)) {
+              res.writeHead(400); res.end(); return;
+            }
+            if (!this.boardExists(raw)) {
+              res.writeHead(404); res.end(); return;
+            }
+            const svg = this.renderThumbnail(raw);
+            if (!svg) {
+              // 空画板：返回一张空白卡片 SVG（前端不显示 broken image）
+              const empty =
+                `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160" viewBox="0 0 240 160">` +
+                `<rect width="240" height="160" fill="#f6f7f9"/>` +
+                `<text x="120" y="80" font-size="13" fill="#9ca3af" text-anchor="middle" dominant-baseline="middle" font-family="ui-sans-serif,system-ui">空白画板</text>` +
+                `</svg>`;
+              res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-cache" });
+              res.end(empty);
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-cache" });
+            res.end(svg);
             return;
           }
           if (url.pathname === "/api/boards" && req.method === "POST") {
@@ -840,6 +889,90 @@ export class CanvasServer {
       occupied: b.elements,
       freeSpots,
     };
+  }
+
+  // ---- 缩略图：从 replayCache 的 strokes 重画为固定尺寸 SVG ----
+
+  /** 单画板缩略图 SVG（固定 240×160，内容按 bbox 等比缩放进窗口）。空画板返回 null 字符串 */
+  renderThumbnail(board: string): string | null {
+    const cache = this.getBoard(board).replayCache;
+    if (cache.length === 0) return null;
+    const W = 240;
+    const H = 160;
+    const PAD = 8;
+
+    // 只统计"有真实几何位置"的笔画（path / image）参与 bbox；
+    // text / hatch 都按其归属元素的几何兜底跳过（缩略图忽略文字细节，避免 10MB 输出）
+    const WALKABLE: Array<{ x: number; y: number; w: number; h: number }> = [];
+    for (const s of cache) {
+      if (s.isText) continue;
+      if (s.image) {
+        WALKABLE.push({ x: s.image.x, y: s.image.y, w: s.image.w, h: s.image.h });
+        continue;
+      }
+      const nums = (s.d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+      if (nums.length < 2) continue;
+      let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
+      for (let i = 0; i < nums.length; i += 2) {
+        const x = nums[i], y = nums[i + 1] ?? nums[i];
+        if (x < mnX) mnX = x;
+        if (y < mnY) mnY = y;
+        if (x > mxX) mxX = x;
+        if (y > mxY) mxY = y;
+      }
+      if (Number.isFinite(mnX)) WALKABLE.push({ x: mnX, y: mnY, w: mxX - mnX, h: mxY - mnY });
+    }
+    if (WALKABLE.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const r of WALKABLE) {
+      if (r.x < minX) minX = r.x;
+      if (r.y < minY) minY = r.y;
+      if (r.x + r.w > maxX) maxX = r.x + r.w;
+      if (r.y + r.h > maxY) maxY = r.y + r.h;
+    }
+
+    // 缩略图笔画密度上限：按 elementId 取样，每元素最多 1-2 条代表笔画
+    // 避免几百条 stroke 把 240x160 缩略图撑到几 MB
+    const STROKE_LIMIT = 80;
+    let strokesToRender = cache;
+    if (cache.length > STROKE_LIMIT) {
+      const seenIds = new Map<string, number>();
+      const sampled: typeof cache = [];
+      for (const s of cache) {
+        const id = s.elementId ?? "_";
+        const seen = seenIds.get(id) ?? 0;
+        if (seen >= 2) continue;
+        seenIds.set(id, seen + 1);
+        sampled.push(s);
+        if (sampled.length >= STROKE_LIMIT) break;
+      }
+      strokesToRender = sampled;
+    }
+    const bw = Math.max(maxX - minX, 1);
+    const bh = Math.max(maxY - minY, 1);
+    const availW = W - PAD * 2;
+    const availH = H - PAD * 2;
+    const scale = Math.min(availW / bw, availH / bh);
+    const offsetX = PAD + (availW - bw * scale) / 2 - minX * scale;
+    const offsetY = PAD + (availH - bh * scale) / 2 - minY * scale;
+    const tx = `translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)}) scale(${scale.toFixed(4)})`;
+    const sw = (s: typeof cache[number]) => Math.max((s.width || 2) / scale, 0.5);
+
+    const parts: string[] = [];
+    for (const s of strokesToRender) {
+      if (s.isText || s.image) continue;
+      // 防御：d 里若含 "<" 说明是 text/html 串，跳过
+      if (s.d.includes("<")) continue;
+      parts.push(
+        `<path d="${s.d}" transform="${tx}" fill="${s.fill ?? "none"}" stroke="${s.fill ? "none" : (s.color || "#37474f")}" stroke-width="${sw(s)}" stroke-linecap="round" stroke-linejoin="round"/>`
+      );
+    }
+    return (
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+      `<rect width="${W}" height="${H}" fill="#fdf6e3"/>` +
+      parts.join("") +
+      `</svg>`
+    );
   }
 }
 

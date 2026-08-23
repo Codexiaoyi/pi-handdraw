@@ -52,8 +52,8 @@ const SCENARIO_PROMPT =
   "所有新增、更新、删除、清空操作都必须交给工蚁；handdraw_canvas 仅可用于 status 查看，任何写操作都会被系统拒绝。" +
   "每条用户消息开头会注明用户正在查看的画板名，画图/改图请把 board 参数设为该画板名。" +
   "画图时，连接箭头必须从节点边缘出发并尽量走空白区域，绝不能穿过任何节点实体；直线会碰到对象时，优先使用明显的弧线路径（type:path），必要时用折线绕开。" +
-  "绘图时必须先规划互不重叠的区域，再调用 handdraw_delegate；即使只有一个区域，也必须委派给工蚁，调用后不要等待工蚁完成。" +
-  "跨区域标题、箭头和验收也只能拆成工蚁任务执行，蚁后不得直接补画。" +
+  "采用多步小走：每次只调用 handdraw_delegate 委派当前最小可见的一小块，优先 1 个任务；不要一次性安排整张图，不要提交 noop 或空任务。工蚁完成后再用 handdraw_canvas status 验收，再决定下一小步。" +
+  "跨区域标题、箭头和验收也只能拆成后续工蚁小任务执行，蚁后不得直接补画。" +
   "回复保持简洁口语化；纯聊天不要调用工具。";
 
 const WORKER_PROMPT =
@@ -117,6 +117,7 @@ interface PiMsg {
   error?: string;
   method?: string;
   assistantMessageEvent?: { type?: string; delta?: string };
+  message?: { stopReason?: string; errorMessage?: string };
   [key: string]: unknown;
 }
 
@@ -129,6 +130,7 @@ class PiRpcSession implements AgentSession {
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private turnText = "";
   private turnThinking = "";
+  private turnError: string | null = null;
   private settledResolve: (() => void) | null = null;
   private textDeltaCbs: Array<(delta: string, full: string) => void> = [];
   private thinkingDeltaCbs: Array<(delta: string, full: string) => void> = [];
@@ -247,6 +249,13 @@ class PiRpcSession implements AgentSession {
       this.emitThinkingDelta(delta, this.turnThinking);
       return;
     }
+    if (msg.type === "message_end") {
+      const message = msg.message;
+      if (message?.stopReason === "error" || message?.stopReason === "aborted") {
+        this.turnError = message.errorMessage || `agent ${message.stopReason}`;
+      }
+      return;
+    }
     if (msg.type === "agent_settled") {
       this.settledResolve?.();
       this.settledResolve = null;
@@ -290,6 +299,7 @@ class PiRpcSession implements AgentSession {
   async prompt(text: string, timeoutMs: number): Promise<string> {
     this.turnText = "";
     this.turnThinking = "";
+    this.turnError = null;
     const settled = new Promise<void>((res) => {
       this.settledResolve = res;
     });
@@ -304,6 +314,7 @@ class PiRpcSession implements AgentSession {
         }, timeoutMs);
       }),
     ]).finally(() => clearTimeout(timer!));
+    if (this.turnError) throw new Error(this.turnError);
     return this.turnText.trim();
   }
 
@@ -679,6 +690,8 @@ const workerWarmups = new Set<string>();
 const dispatchVersions = new Map<string, number>();
 // 蚁后聊天仍然是一问一答；工蚁队列完全独立，后台异步执行。
 let busy = false;
+// 每轮聊天最多派一批当前小任务，下一步由下一轮 status 验收后再安排。
+let dispatchesThisTurn = 0;
 
 function workerBoard(board: string): WorkerBoardState {
   const key = boardKey(board);
@@ -764,6 +777,27 @@ function isDrawingRequest(message: string): boolean {
   return /画|绘|图|架构|流程|涂鸦|手帐|示意|设计|做个|制作|绘制|draw|diagram|sketch/i.test(message);
 }
 
+async function boardRegionElementCount(
+  board: string,
+  canvasPort: number,
+  region: { x: number; y: number; w: number; h: number }
+): Promise<number | null> {
+  try {
+    const response = await fetch(`http://localhost:${canvasPort}/state?board=${encodeURIComponent(boardKey(board))}`);
+    if (!response.ok) return null;
+    const summary = await response.json() as {
+      occupied?: Array<{ x: number; y: number; w: number; h: number }>;
+    };
+    return (summary.occupied ?? []).filter((item) =>
+      item.x >= region.x - 2 && item.y >= region.y - 2 &&
+      item.x + item.w <= region.x + region.w + 2 &&
+      item.y + item.h <= region.y + region.h + 2
+    ).length;
+  } catch {
+    return null;
+  }
+}
+
 async function fallbackDelegate(board: string, message: string, canvasPort: number): Promise<void> {
   const key = boardKey(board);
   let summary: { bounds?: { maxX: number; minY: number }; occupied?: Array<{ x: number; y: number; w: number; h: number }> } = {};
@@ -774,23 +808,18 @@ async function fallbackDelegate(board: string, message: string, canvasPort: numb
   const maxX = Number.isFinite(summary.bounds?.maxX) ? summary.bounds!.maxX : 80;
   const minY = Number.isFinite(summary.bounds?.minY) ? Math.max(80, summary.bounds!.minY) : 100;
   const x = maxX + 140;
-  const regions = [
-    { x, y: minY, w: 300, h: 220, part: "左上/入口部分" },
-    { x: x + 340, y: minY, w: 300, h: 220, part: "右上/处理部分" },
-    { x, y: minY + 280, w: 300, h: 220, part: "左下/辅助部分" },
-    { x: x + 340, y: minY + 280, w: 300, h: 220, part: "右下/结果部分" },
-  ];
-  const tasks = regions.map((region, index) => ({
-    taskId: `auto-${Date.now()}-${index + 1}`,
-    title: `自动拆分 ${region.part}`,
-    region: { x: region.x, y: region.y, w: region.w, h: region.h },
+  const region = { x, y: minY, w: 300, h: 220 };
+  const tasks = [{
+    taskId: `auto-${Date.now()}-1`,
+    title: "自动拆分 当前第一小步",
+    region,
     instructions:
       `用户原始需求：${message}\n` +
-      `你负责整体图中的${region.part}。只在指定 region 内绘制与其他三个区域互补的内容；` +
-      "必须使用明确的绝对坐标、每个元素带 desc，不能调用 handdraw_delegate。",
-  }));
+      "这是系统兜底的第一小步。只在指定 region 内绘制一个简单、可见的起始元素；" +
+      "必须使用明确的绝对坐标、每个元素带 desc，不能调用 handdraw_delegate。完成后等待下一步，不要扩展到其他区域。",
+  }];
   await enqueueWorkerTasks(key, tasks, canvasPort);
-  addHistory(key, "system", `系统兜底：蚁后本轮未成功委派，已自动拆成 4 个工蚁任务：\n${tasks.map((t) => `- ${t.taskId}：${t.title} @ ${JSON.stringify(t.region)}`).join("\n")}`);
+  addHistory(key, "system", `系统兜底：蚁后本轮未成功委派，已自动安排 1 个最小任务：\n${tasks.map((t) => `- ${t.taskId}：${t.title} @ ${JSON.stringify(t.region)}`).join("\n")}`);
 }
 
 async function pumpWorkers(board: string, canvasPort: number): Promise<void> {
@@ -804,6 +833,7 @@ async function pumpWorkers(board: string, canvasPort: number): Promise<void> {
       try {
         // 先登记 taskId/region，再让 worker 调用绘图工具，避免首笔画撞上状态竞态。
         await reportWorker(worker, board);
+        const beforeCount = await boardRegionElementCount(board, canvasPort, task.region);
         const session = await ensureWorker(worker, board, canvasPort);
         worker.status = "drawing";
         await reportWorker(worker, board);
@@ -814,8 +844,14 @@ async function pumpWorkers(board: string, canvasPort: number): Promise<void> {
           "调用 handdraw_canvas 时必须原样携带 taskId 和 region 参数；每个元素必须完全位于 region 内。只画这个区域内的任务；完成后回复 completed。";
         addHistory(board, "worker", `${worker.id} 已领取任务 ${task.taskId}\n区域：${JSON.stringify(task.region)}\n要求：${task.instructions}`);
         const workerReply = await session.prompt(prompt, PROMPT_TIMEOUT);
-        worker.status = "idle";
-        addHistory(board, "worker", `${worker.id} 完成任务 ${task.taskId}${workerReply ? `\n回复：${workerReply}` : ""}`);
+        const afterCount = await boardRegionElementCount(board, canvasPort, task.region);
+        if (beforeCount !== null && afterCount !== null && afterCount <= beforeCount) {
+          worker.status = "failed";
+          addHistory(board, "worker", `${worker.id} 任务 ${task.taskId} 失败：模型已结束，但画板没有新增元素；未记录为完成。${workerReply ? `\n回复：${workerReply}` : ""}`);
+        } else {
+          worker.status = "idle";
+          addHistory(board, "worker", `${worker.id} 完成任务 ${task.taskId}${workerReply ? `\n回复：${workerReply}` : ""}`);
+        }
       } catch (error) {
         worker.status = "failed";
         const reason = error instanceof Error ? error.message : String(error);
@@ -889,6 +925,7 @@ function getBoardAgent(board: string): BoardAgentState {
 function bindQueenStream(session: AgentSession, board: string): void {
   const state = getBoardAgent(board);
   session.onTextDelta((delta, full) => {
+    void setAgentWorking(true);
     if (!state.activeAgentMessage) {
       state.activeAgentMessage = addHistory(board, "agent", "");
     }
@@ -906,6 +943,7 @@ function bindQueenStream(session: AgentSession, board: string): void {
   });
   // reasoning 增量：完整打到蚁后气泡里，避免“思考中…”看不见任何字。
   session.onThinkingDelta((delta, full) => {
+    void setAgentWorking(true);
     state.activeThinking = full;
     if (!state.activeAgentMessage) {
       // 思考先于第一条 text：仅占位，不写入历史（思考是中途状态，历史只记最终文字回复）。
@@ -1000,9 +1038,9 @@ async function chatWithAgent(message: string, board: string, canvasPort: number)
   const dispatchVersionBefore = dispatchVersions.get(key) ?? 0;
   // 先把用户消息和一个临时的蚁后消息放进历史；模型尚未输出文字时，历史也能显示“思考中…”。
   addHistory(key, "user", message);
+  dispatchesThisTurn = 0;
   const state = getBoardAgent(key);
   state.activeAgentMessage = addHistory(key, "agent", "");
-  await setAgentWorking(true);
   try {
     const reply = await agent.prompt(context, PROMPT_TIMEOUT);
     if (isDrawingRequest(message) && (dispatchVersions.get(key) ?? 0) === dispatchVersionBefore) {
@@ -1151,13 +1189,17 @@ function makeAgentApi(canvasPortRef: () => number) {
     }
     if (url.pathname === "/api/delegate" && req.method === "POST") {
       try {
+        if (busy && dispatchesThisTurn >= 1) {
+          throw new Error("本轮已安排一个小步骤；请等工蚁完成并在下一轮查看 status 后再继续委派");
+        }
         const body = await readBody(req);
         const board = String(body.board ?? DEFAULT_BOARD);
         if (!isValidBoardName(board)) throw new Error("非法画板名");
         const rawTasks = Array.isArray(body.tasks) ? body.tasks : [];
         const tasks = rawTasks.filter((task): task is Record<string, unknown> => Boolean(task && typeof task === "object"));
         if (!tasks.length) throw new Error("没有任务");
-        if (tasks.length !== 4) throw new Error("严格四工蚁模式要求一次委派 4 个互不重叠的区域任务");
+        if (tasks.length < 1 || tasks.length > 4) throw new Error("增量委派每次要求 1～4 个互不重叠的区域任务；建议每次只派 1 个小任务");
+        if (busy && tasks.length !== 1) throw new Error("多步小走模式下，每轮只能委派 1 个当前小任务；完成后下一轮再继续");
         const normalized = tasks.map((task, index) => {
           const region = task.region as Record<string, unknown>;
           if (!region || ![region.x, region.y, region.w, region.h].every((n) => typeof n === "number" && Number.isFinite(n))) {
@@ -1183,6 +1225,7 @@ function makeAgentApi(canvasPortRef: () => number) {
         }
             addHistory(board, "system", `蚁后已派发 ${normalized.length} 个工蚁任务：\n${normalized.map((task) => `- ${task.taskId} @ ${JSON.stringify(task.region)}：${task.instructions}`).join("\n")}`);
         const result = await enqueueWorkerTasks(board, normalized, canvasPortRef());
+        if (busy) dispatchesThisTurn++;
         setTimeout(() => scheduleWorkerWarmup(board, canvasPortRef()), 1500);
         json(200, { ok: true, board: boardKey(board), ...result, workers: result.workers.map((w) => ({ id: w.id, status: w.status, taskId: w.task?.taskId })) });
       } catch (e) {

@@ -170,8 +170,8 @@ export const DELEGATE_PARAMS_SCHEMA = {
     board: { type: "string", description: "目标画板名" },
     tasks: {
       type: "array",
-      description: "严格四工蚁模式：必须一次提交恰好 4 个互不重叠的独立绘图任务，每个任务由一只工蚁执行",
-      minItems: 4,
+      description: "增量委派：每次提交 1～4 个互不重叠的独立绘图任务；建议先提交当前最小可见步骤，完成后再继续",
+      minItems: 1,
       maxItems: 4,
       items: {
         type: "object",

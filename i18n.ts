@@ -64,12 +64,13 @@ const zh: Dict = {
     "下一步空位推荐：{spots}",
   "tool.bounds": "，范围 x[{minX}-{maxX}] y[{minY}-{maxY}]",
 
-  "delegate.desc": "蚁后异步调度四个绘图工蚁。调用后立即返回；工蚁在后台领取任务并只负责画指定区域，不负责和用户对话或重新规划整体布局。",
+  "delegate.desc": "蚁后增量调度绘图工蚁。每次可提交 1～4 个任务，调用后立即返回；工蚁只负责画指定区域，不负责和用户对话或重新规划整体布局。",
   "delegate.guidelines": [
-    "先把当前任务拆成互不依赖、互不重叠的区域任务，再调用异步调度工具。",
+    "采用多步小走：每轮只委派当前最小、可见、互不重叠的一小块，优先 1 个任务；工蚁完成后再查看 status 并决定下一步。",
+    "不要一次性安排整张图，也不要为了凑数提交空任务或 noop 任务。",
     "每个任务必须给 region 和具体 instructions；同一个元素内部不要拆给不同工蚁。",
-    "跨区域的标题、连接线和最终验收由蚁后自己处理。",
-    "工蚁完成后自动变为空闲并可领取队列中的下一个任务；不要等待本工具返回完成结果。",
+    "跨区域标题、连接线和最终验收也拆成后续小任务，不能由蚁后直接补画。",
+    "工蚁完成后自动变为空闲；不要等待委派工具返回，但后续步骤必须基于实际完成结果继续。",
   ],
 
   // ---- handdraw_board 工具 ----
@@ -172,12 +173,13 @@ const en: Dict = {
     "Suggested free spots: {spots}",
   "tool.bounds": ", range x[{minX}-{maxX}] y[{minY}-{maxY}]",
 
-  "delegate.desc": "Asynchronously dispatch drawing tasks to four worker ants. Return immediately; workers only draw within their assigned regions and never handle user conversation or global layout.",
+  "delegate.desc": "Incrementally dispatch drawing workers. Submit 1-4 tasks per call; return immediately. Workers only draw within assigned regions and never handle user conversation or global layout.",
   "delegate.guidelines": [
-    "Split the current request into independent, non-overlapping region tasks before dispatching.",
+    "Use small steps: each round should dispatch only the smallest visible, non-overlapping next piece, preferably one task; inspect status after it completes before continuing.",
+    "Do not schedule the whole diagram at once, and do not submit empty or noop tasks just to fill worker slots.",
     "Every task needs a region and concrete instructions; keep one element's strokes together.",
-    "The queen handles cross-region titles, connectors, and final verification.",
-    "Workers become idle after completion and automatically claim the next queued task; do not wait for this tool to finish.",
+    "Split cross-region titles, connectors, and final verification into later small tasks; the queen must not draw them directly.",
+    "Workers become idle after completion; do not wait for the delegate call, but base later steps on actual completion results.",
   ],
 
   "board.desc":

@@ -16,7 +16,7 @@ export async function executeDelegateAction(params: DelegateParams, opts: Execut
   const board = params.board && isValidBoardName(params.board) ? params.board : server.getActiveBoard();
   const tasks = (params.tasks ?? []).filter((task) => task && typeof task.instructions === "string" && task.region);
   if (!tasks.length) return { text: "没有可分配的工蚁任务。", details: { ok: false } };
-  if (tasks.length !== 4) return { text: "❌ 严格四工蚁模式要求一次委派 4 个互不重叠的区域任务。", details: { ok: false, requiredWorkers: 4 } };
+  if (tasks.length > 4) return { text: "❌ 一次最多委派 4 个互不重叠的区域任务；建议每次只走一小步。", details: { ok: false, maxWorkers: 4 } };
   const payload = { board, tasks: tasks.map((task, i) => ({ ...task, taskId: task.taskId || `task-${Date.now()}-${i + 1}` })) };
   try {
     const response = await fetch(`http://localhost:${server.getPort()}/api/delegate`, {

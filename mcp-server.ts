@@ -30,6 +30,10 @@ import {
   BOARD_PARAMS_SCHEMA,
   toolDescriptionFull,
   boardToolDescriptionFull,
+  executeDelegateAction,
+  DELEGATE_PARAMS_SCHEMA,
+  delegateToolDescription,
+  delegateToolGuidelines,
 } from "./core";
 
 const server = new Server(
@@ -55,6 +59,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: boardToolDescriptionFull(),
       inputSchema: BOARD_PARAMS_SCHEMA,
     },
+    {
+      name: "handdraw_delegate",
+      description: delegateToolDescription() + "\n\n" + delegateToolGuidelines().map((g) => `- ${g}`).join("\n"),
+      inputSchema: DELEGATE_PARAMS_SCHEMA,
+    },
   ],
 }));
 
@@ -65,6 +74,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     result = await executeCanvasAction(args as Parameters<typeof executeCanvasAction>[0], { openBrowser: true });
   } else if (req.params.name === "handdraw_board") {
     result = await executeBoardAction(args as unknown as Parameters<typeof executeBoardAction>[0], { openBrowser: true });
+  } else if (req.params.name === "handdraw_delegate") {
+    result = await executeDelegateAction(args as Parameters<typeof executeDelegateAction>[0], { openBrowser: true });
   } else {
     throw new Error(`Unknown tool: ${req.params.name}`);
   }

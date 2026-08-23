@@ -34,6 +34,11 @@ import { t, tArr, getLang, type Lang } from "./i18n";
 // ---------------------------------------------------------------------------
 
 const zProp = { type: "number", description: "叠放层次：小的在下面；不设则后画的在上" };
+
+/** 实时画布默认采用 turbo：相对旧 fast 时序约 2×，尤其降低中文逐笔画的累计等待。 */
+const LIVE_ANIM_SPEED = "turbo" as const;
+/** 从 worker 子进程继承的身份会写入每条笔画，页面据此选择对应绘制通道。 */
+const DRAW_WORKER_ID = process.env.HANDDRAW_WORKER_ID || undefined;
 const descProp = {
   type: "string",
   description:
@@ -176,6 +181,13 @@ export const PARAMS_SCHEMA = {
     board: { type: "string", description: "目标画板名（默认当前画板；画板管理用 handdraw_board 工具）" },
     elementId: { type: "string", description: "要修改/删除的元素 ID（从上次返回的摘要或 occupied 列表获取）" },
     elements: { type: "array", items: ELEMENT_SCHEMA, description: "本次要画的元素（draw 用）或新元素（update 用）" },
+    taskId: { type: "string", description: "工蚁任务 ID（仅异步工蚁绘图时使用）" },
+    region: {
+      type: "object",
+      description: "工蚁任务允许区域；工蚁绘制的元素必须完全位于其中",
+      properties: { x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } },
+      required: ["x", "y", "w", "h"],
+    },
     allowOverlap: {
       type: "boolean",
       description:
@@ -183,6 +195,35 @@ export const PARAMS_SCHEMA = {
     },
   },
   required: ["elements"],
+};
+
+export const DELEGATE_PARAMS_SCHEMA = {
+  type: "object",
+  properties: {
+    board: { type: "string", description: "目标画板名" },
+    tasks: {
+      type: "array",
+      description: "严格四工蚁模式：必须一次提交恰好 4 个互不重叠的独立绘图任务，每个任务由一只工蚁执行",
+      minItems: 4,
+      maxItems: 4,
+      items: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "任务 ID；不填则自动生成" },
+          title: { type: "string", description: "任务简短标题" },
+          region: {
+            type: "object",
+            description: "工蚁允许工作的区域，x/y 为左上角",
+            properties: { x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } },
+            required: ["x", "y", "w", "h"],
+          },
+          instructions: { type: "string", description: "给工蚁的绘图说明" },
+        },
+        required: ["region", "instructions"],
+      },
+    },
+  },
+  required: ["tasks"],
 };
 
 export const BOARD_PARAMS_SCHEMA = {
@@ -220,6 +261,36 @@ export function boardToolDescriptionFull(lang: Lang = getLang()): string {
 export function boardToolGuidelines(lang: Lang = getLang()): string[] {
   return tArr("board.guidelines", lang);
 }
+export function delegateToolDescription(lang: Lang = getLang()): string {
+  return t("delegate.desc", undefined, lang);
+}
+export function delegateToolGuidelines(lang: Lang = getLang()): string[] {
+  return tArr("delegate.guidelines", lang);
+}
+
+export async function executeDelegateAction(params: DelegateParams, opts: ExecuteOptions = {}): Promise<ToolResult> {
+  if (DRAW_WORKER_ID) {
+    return { text: "工蚁不能继续派发子任务，只能执行蚁后已分配的绘图任务。", details: { ok: false, workerId: DRAW_WORKER_ID } };
+  }
+  const url = await ensureCanvasServer(opts.openBrowser ?? false);
+  if (!url) return { text: "无法连接工蚁调度器。", details: { ok: false } };
+  const server = getCanvasServer();
+  const board = params.board && isValidBoardName(params.board) ? params.board : server.getActiveBoard();
+  const tasks = (params.tasks ?? []).filter((task) => task && typeof task.instructions === "string" && task.region);
+  if (!tasks.length) return { text: "没有可分配的工蚁任务。", details: { ok: false } };
+  if (tasks.length !== 4) return { text: "❌ 严格四工蚁模式要求一次委派 4 个互不重叠的区域任务。", details: { ok: false, requiredWorkers: 4 } };
+  const payload = { board, tasks: tasks.map((task, i) => ({ ...task, taskId: task.taskId || `task-${Date.now()}-${i + 1}` })) };
+  try {
+    const response = await fetch(`http://localhost:${server.getPort()}/api/delegate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = (await response.json()) as Record<string, unknown>;
+    if (!response.ok || data.ok === false) throw new Error(String(data.error ?? "调度器拒绝任务"));
+    return { text: `✅ 已异步分配 ${tasks.length} 个工蚁任务；蚁后可以继续与用户交流，工蚁完成后会自动领取后续任务。`, details: data };
+  } catch (e) {
+    return { text: `❌ 工蚁调度失败：${e instanceof Error ? e.message : String(e)}`, details: { ok: false } };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -230,6 +301,9 @@ export interface CanvasActionParams {
   board?: string;
   elementId?: string;
   elements?: Array<{ type: string } & Record<string, unknown>>;
+  /** 异步工蚁任务上下文；主 agent 不需要填写 */
+  taskId?: string;
+  region?: Rect;
   /** 允许覆盖已有内容（默认禁止：部分重叠会被拒绝） */
   allowOverlap?: boolean;
 }
@@ -237,6 +311,18 @@ export interface CanvasActionParams {
 export interface BoardActionParams {
   action: "list" | "create" | "switch" | "delete";
   name?: string;
+}
+
+export interface DelegateTask {
+  taskId?: string;
+  title?: string;
+  region: { x: number; y: number; w: number; h: number };
+  instructions: string;
+}
+
+export interface DelegateParams {
+  board?: string;
+  tasks: DelegateTask[];
 }
 
 export interface ToolResult {
@@ -267,7 +353,7 @@ function resolveImageSrc(src: string, board: string): string | null {
 }
 
 /** 图片元素不是笔画：构造一条带 image 字段的消息，页面直接渲染 <image> */
-function imageStrokeMsg(el: ImageElement, board: string, elementId: string, z?: number): StrokeMsg {
+function imageStrokeMsg(el: ImageElement, board: string, elementId: string, z?: number, taskId?: string): StrokeMsg {
   return {
     type: "stroke",
     d: "",
@@ -279,6 +365,8 @@ function imageStrokeMsg(el: ImageElement, board: string, elementId: string, z?: 
     label: el.desc ?? el.src.split("/").pop() ?? "image",
     elementId,
     z,
+    workerId: DRAW_WORKER_ID,
+    taskId,
     image: { src: resolveImageSrc(el.src, board)!, x: el.x, y: el.y, w: el.w, h: el.h },
   };
 }
@@ -292,6 +380,13 @@ interface Rect {
   h: number;
 }
 
+function taskRegionError(params: CanvasActionParams, info: CanvasElementInfo): string | null {
+  if (!DRAW_WORKER_ID) return null;
+  if (!params.taskId || !params.region) return `工蚁 ${DRAW_WORKER_ID} 必须在 handdraw_canvas 中携带 taskId 和 region。`;
+  if (!rectContains(params.region, info)) return `工蚁任务 ${params.taskId} 的元素超出允许区域。`;
+  return null;
+}
+
 /** 向内缩 inset 像素：容忍贴边连接（箭头连到框边缘）等轻微接触 */
 function shrinkRect(r: Rect, inset: number): Rect {
   const w = Math.max(r.w - inset * 2, 1);
@@ -303,12 +398,12 @@ function rectHit(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-function rectContains(outer: Rect, inner: Rect): boolean {
+function rectContains(outer: Rect, inner: Rect, tolerance = 0): boolean {
   return (
-    outer.x <= inner.x &&
-    outer.y <= inner.y &&
-    outer.x + outer.w >= inner.x + inner.w &&
-    outer.y + outer.h >= inner.y + inner.h
+    outer.x <= inner.x + tolerance &&
+    outer.y <= inner.y + tolerance &&
+    outer.x + outer.w >= inner.x + inner.w - tolerance &&
+    outer.y + outer.h >= inner.y + inner.h - tolerance
   );
 }
 
@@ -573,11 +668,15 @@ async function ensureCanvasServer(openBrowser: boolean): Promise<string | null> 
 async function pushToCanvas(board: string, msgs: StrokeMsg[], infos: CanvasElementInfo[]): Promise<void> {
   const server = getCanvasServer();
   if (canvasServerMode === "remote") {
-    await fetch(`http://localhost:${server.getPort()}/api/push`, {
+    const response = await fetch(`http://localhost:${server.getPort()}/api/push`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ board, strokes: msgs, elements: infos }),
     });
+    if (!response.ok) {
+      const reason = await response.text().catch(() => "");
+      throw new Error(reason || `画布服务器拒绝推送（HTTP ${response.status}）`);
+    }
   } else {
     server.pushStrokes(board, msgs, infos);
   }
@@ -710,6 +809,14 @@ export async function executeCanvasAction(
   opts: ExecuteOptions = {}
 ): Promise<ToolResult> {
   const action = params.action ?? "draw";
+  const isStatusRequest = action === "status" || (action === "draw" && (params.elements ?? []).length === 0);
+  // 严格蚁后模式：蚁后只负责理解、拆分、调度和验收，所有画布写操作必须由工蚁完成。
+  if (!DRAW_WORKER_ID && !isStatusRequest) {
+    return {
+      text: "❌ 蚁后不能直接修改画布。请先把绘图拆成互不重叠的区域任务，再调用 handdraw_delegate；蚁后只能用 handdraw_canvas 查看 status。",
+      details: { ok: false, role: "queen", action },
+    };
+  }
   const url = await ensureCanvasServer(opts.openBrowser ?? true);
   if (!url) {
     return { text: t("tool.serverFail"), details: { ok: false } };
@@ -718,6 +825,9 @@ export async function executeCanvasAction(
   const board = params.board && isValidBoardName(params.board) ? params.board : server.getActiveBoard();
 
   if (action === "clear") {
+    if (DRAW_WORKER_ID) {
+      return { text: "❌ 工蚁不能清空画板，只能绘制蚁后分配的区域。", details: { ok: false, workerId: DRAW_WORKER_ID } };
+    }
     if (canvasServerMode === "remote") {
       await fetch(`http://localhost:${server.getPort()}/api/clear`, {
         method: "POST",
@@ -783,11 +893,13 @@ export async function executeCanvasAction(
     }
     const el = validElements[0];
     let info = toElementInfo(el);
+    const scopeError = taskRegionError(params, info);
+    if (scopeError) return { text: `❌ ${scopeError}`, details: { ok: false, taskId: params.taskId } };
     let msgs: StrokeMsg[];
     if (el.type === "image") {
-      msgs = [imageStrokeMsg(el, board, params.elementId, info.z)];
+      msgs = [imageStrokeMsg(el, board, params.elementId, info.z, params.taskId)];
     } else {
-      const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+      const { strokes } = buildStrokeSequence(buildOpts(el), LIVE_ANIM_SPEED);
       msgs = strokes.map((s) => ({
         type: "stroke",
         d: s.d,
@@ -801,6 +913,8 @@ export async function executeCanvasAction(
         penUp: false,
         label: s.label,
         elementId: params.elementId,
+        workerId: DRAW_WORKER_ID,
+        taskId: params.taskId,
       }));
       // 真实边界回写：笔画采样 bbox ∪ 声明估算
       const real = strokesBBox(msgs);
@@ -839,6 +953,9 @@ export async function executeCanvasAction(
   }
 
   if (action === "remove") {
+    if (DRAW_WORKER_ID) {
+      return { text: "❌ 工蚁不能删除元素，只能绘制蚁后分配的区域。", details: { ok: false, workerId: DRAW_WORKER_ID } };
+    }
     if (!params.elementId) {
       return { text: t("tool.removeNeedId"), details: {} };
     }
@@ -858,12 +975,14 @@ export async function executeCanvasAction(
     const elId = `el${Math.floor(Math.random() * 1e9).toString(36)}`;
     let info = toElementInfo(el);
     info.id = elId;
+    const scopeError = taskRegionError(params, info);
+    if (scopeError) return { text: `❌ ${scopeError}`, details: { ok: false, taskId: params.taskId } };
     let msgs: StrokeMsg[];
     if (el.type === "image") {
       // 图片不是笔画：直接推 image 消息，页面即时渲染
-      msgs = [imageStrokeMsg(el, board, elId, info.z)];
+      msgs = [imageStrokeMsg(el, board, elId, info.z, params.taskId)];
     } else {
-      const { strokes } = buildStrokeSequence(buildOpts(el), "fast");
+      const { strokes } = buildStrokeSequence(buildOpts(el), LIVE_ANIM_SPEED);
       msgs = strokes.map((s) => ({
         type: "stroke",
         d: s.d,
@@ -878,6 +997,8 @@ export async function executeCanvasAction(
         label: s.label,
         elementId: elId,
         z: info.z,
+        workerId: DRAW_WORKER_ID,
+        taskId: params.taskId,
       }));
       // 真实边界回写：笔画采样 bbox ∪ 声明估算（文字估算仍覆盖文字区域）
       const real = strokesBBox(msgs);

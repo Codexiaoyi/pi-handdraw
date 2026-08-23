@@ -455,7 +455,7 @@ export interface AnimScript {
   parts: AnimPart[];
 }
 
-export type AnimSpeed = "real" | "fast";
+export type AnimSpeed = "real" | "fast" | "turbo";
 
 interface SpeedTiming {
   edgeFrames: number;
@@ -468,8 +468,11 @@ interface SpeedTiming {
 const SPEED: Record<AnimSpeed, SpeedTiming> = {
   // 正常手写速度：一笔约 0.2-0.3 秒
   real: { edgeFrames: 6, edgeInterval: 42, strokeFrames: 4, strokeInterval: 48, fillInterval: 8 },
-  // 快速：总时长约减半
+  // 原有 live-canvas 速度，保留给导出/兼容调用。
   fast: { edgeFrames: 3, edgeInterval: 26, strokeFrames: 2, strokeInterval: 26, fillInterval: 6 },
+  // 实时画布默认：每个汉字笔画只占一个短动画周期。
+  // 中文的总时间主要随笔画数线性增长；相对 fast 可将服务器侧时长再压缩约一半。
+  turbo: { edgeFrames: 2, edgeInterval: 26, strokeFrames: 1, strokeInterval: 26, fillInterval: 4 },
 };
 
 function growingPart(pathD: string, color: string, strokeWidth: number, frames: number, interval: number, label: string): AnimPart {

@@ -23,7 +23,8 @@ const zh: Dict = {
     "画布分多个画板（board）：默认画到当前画板，可用 board 参数指定目标画板（画板管理用 handdraw_board 工具）。\n" +
     "画布自动扩展，元素可以放到任意坐标。",
   "tool.guidelines": [
-    "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
+    "蚁后不能直接调用 handdraw_canvas 写入画布；蚁后只能查看 status，所有新增、更新、删除、清空都必须通过 handdraw_delegate 交给工蚁执行。",
+    "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them. This applies only to delegated worker tasks.",
     "BEFORE the first draw of a new diagram, ALWAYS call action \"status\" first. If the canvas already has content, start the new diagram at the recommended freeSpots (prefer 内容右侧, keep the gap) so it sits side by side with existing diagrams — never draw over occupied regions.",
     "严禁覆盖已有内容：新元素与已占用区域发生部分重叠会被直接拒绝（返回冲突清单）。容器包含子元素、底色块垫文字这类完全包含关系不受限制；只有确有意的覆盖才允许传 allowOverlap: true。",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
@@ -62,6 +63,14 @@ const zh: Dict = {
     "画板现状：{count} 个元素{bounds}。\n" +
     "下一步空位推荐：{spots}",
   "tool.bounds": "，范围 x[{minX}-{maxX}] y[{minY}-{maxY}]",
+
+  "delegate.desc": "蚁后异步调度四个绘图工蚁。调用后立即返回；工蚁在后台领取任务并只负责画指定区域，不负责和用户对话或重新规划整体布局。",
+  "delegate.guidelines": [
+    "先把当前任务拆成互不依赖、互不重叠的区域任务，再调用异步调度工具。",
+    "每个任务必须给 region 和具体 instructions；同一个元素内部不要拆给不同工蚁。",
+    "跨区域的标题、连接线和最终验收由蚁后自己处理。",
+    "工蚁完成后自动变为空闲并可领取队列中的下一个任务；不要等待本工具返回完成结果。",
+  ],
 
   // ---- handdraw_board 工具 ----
   "board.desc":
@@ -122,7 +131,8 @@ const en: Dict = {
     "The canvas is organized into boards: draw calls go to the active board unless a board parameter is given (manage boards with the handdraw_board tool).\n" +
     "The canvas auto-expands; elements can be placed at any coordinates.",
   "tool.guidelines": [
-    "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them.",
+    "The queen agent must never write to the canvas through handdraw_canvas; it may only use status. All drawing, updates, removal, and clearing must be delegated to workers through handdraw_delegate.",
+    "Use handdraw_canvas for real-time drawing: each call draws 1~3 elements and the browser shows them immediately with a pen writing them. This applies only to delegated worker tasks.",
     "BEFORE the first draw of a new diagram, ALWAYS call action \"status\" first. If the canvas already has content, start the new diagram at the recommended freeSpots (prefer right of the content, keep the gap) so it sits side by side with existing diagrams — never draw over occupied regions.",
     "NEVER cover existing content: a new element partially overlapping any occupied region is rejected outright (you get the collision list). Full containment (child inside a container, a background block under text) is allowed; pass allowOverlap: true only when the overlap is truly intentional.",
     "Decide positions based on the returned canvas summary (freeSpots tells you where the empty space is). Draw top-to-bottom or left-to-right, one component at a time.",
@@ -161,6 +171,14 @@ const en: Dict = {
     "Board now: {count} elements{bounds}.\n" +
     "Suggested free spots: {spots}",
   "tool.bounds": ", range x[{minX}-{maxX}] y[{minY}-{maxY}]",
+
+  "delegate.desc": "Asynchronously dispatch drawing tasks to four worker ants. Return immediately; workers only draw within their assigned regions and never handle user conversation or global layout.",
+  "delegate.guidelines": [
+    "Split the current request into independent, non-overlapping region tasks before dispatching.",
+    "Every task needs a region and concrete instructions; keep one element's strokes together.",
+    "The queen handles cross-region titles, connectors, and final verification.",
+    "Workers become idle after completion and automatically claim the next queued task; do not wait for this tool to finish.",
+  ],
 
   "board.desc":
     "Manage boards of the hand-drawn canvas. Each board maps to a directory on disk (boards/<name>/): " +

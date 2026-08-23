@@ -22,19 +22,24 @@ import {
   toolGuidelines,
   boardToolDescription,
   boardToolGuidelines,
+  executeDelegateAction,
+  DELEGATE_PARAMS_SCHEMA,
+  delegateToolDescription,
+  delegateToolGuidelines,
 } from "./core";
 
 export default function (pi: ExtensionAPI) {
-  // agent 工作期间（思考 + 调用工具作画都算）点亮画布页面呼吸灯
+  // 工蚁有自己的状态上报；只有蚁后控制全局思考/作画呼吸灯。
+  const isWorker = Boolean(process.env.HANDDRAW_WORKER_ID);
   pi.on("agent_start", () => {
-    void setAgentWorking(true);
+    if (!isWorker) void setAgentWorking(true);
   });
   pi.on("agent_end", () => {
-    void setAgentWorking(false);
+    if (!isWorker) void setAgentWorking(false);
   });
 
   pi.on("session_shutdown", () => {
-    void setAgentWorking(false);
+    if (!isWorker) void setAgentWorking(false);
     shutdownCanvasServer();
   });
 
@@ -56,6 +61,20 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text: result.text }],
         details: result.details,
       };
+    },
+  });
+
+  // ---- 蚁后异步调度四个绘图工蚁 ----
+  pi.registerTool({
+    name: "handdraw_delegate",
+    label: "异步调度工蚁",
+    description: delegateToolDescription(),
+    promptSnippet: "Asynchronously dispatch independent drawing tasks to four worker ants",
+    promptGuidelines: delegateToolGuidelines(),
+    parameters: DELEGATE_PARAMS_SCHEMA as unknown as TSchema,
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      const result = await executeDelegateAction(rawParams as Parameters<typeof executeDelegateAction>[0], { openBrowser: ctx.hasUI });
+      return { content: [{ type: "text", text: result.text }], details: result.details };
     },
   });
 
